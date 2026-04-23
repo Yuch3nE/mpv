@@ -111,8 +111,14 @@ struct mpv_render_context {
     struct mp_vo_opts *vo_opts;
 };
 
-const struct render_backend_fns *render_backends[] = {
+static const struct render_backend_fns *default_render_backends[] = {
     &render_backend_gpu,
+    &render_backend_sw,
+    NULL
+};
+
+static const struct render_backend_fns *gpu_next_render_backends[] = {
+    &render_backend_gpu_next,
     &render_backend_sw,
     NULL
 };
@@ -183,6 +189,13 @@ int mpv_render_context_create(mpv_render_context **res, mpv_handle *mpv,
 
     if (GET_MPV_RENDER_PARAM(params, MPV_RENDER_PARAM_ADVANCED_CONTROL, int, 0))
         ctx->advanced_control = true;
+
+    char *backend_name = get_mpv_render_param(params, MPV_RENDER_PARAM_BACKEND,
+                                              NULL);
+    const struct render_backend_fns **render_backends =
+        backend_name && strcmp(backend_name, "gpu-next") == 0
+        ? gpu_next_render_backends
+        : default_render_backends;
 
     int err = MPV_ERROR_NOT_IMPLEMENTED;
     for (int n = 0; render_backends[n]; n++) {

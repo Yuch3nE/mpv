@@ -257,7 +257,13 @@ sources = files(
     'video/out/placebo/ra_pl.c',
     'video/out/placebo/utils.c',
     'video/out/vo_gpu_next.c',
+    'video/out/gpu_next/cache.c',
+    'video/out/gpu_next/color.c',
     'video/out/gpu_next/context.c',
+    'video/out/gpu_next/libmpv_gpu_next.c',
+    'video/out/gpu_next/osd.c',
+    'video/out/gpu_next/user_shaders.c',
+    'video/out/gpu_next/video.c',
 
     ## osdep
     'osdep/io.c',
@@ -1296,6 +1302,7 @@ if features['gl']
                      'video/out/opengl/context.c',
                      'video/out/opengl/formats.c',
                      'video/out/opengl/libmpv_gl.c',
+                     'video/out/opengl/libmpv_gpu_next_gl.c',
                      'video/out/opengl/ra_gl.c',
                      'video/out/opengl/utils.c')
 elif not features['gl'] and get_option('gl').enabled()

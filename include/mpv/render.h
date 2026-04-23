@@ -422,6 +422,18 @@ typedef enum mpv_render_param_type {
      * See MPV_RENDER_PARAM_SW_STRIDE for alignment requirements.
      */
     MPV_RENDER_PARAM_SW_POINTER = 20,
+    /**
+     * Select the libmpv internal render backend implementation.
+     * Valid for mpv_render_context_create().
+     * Type: char*
+     *
+     * Defined backend names:
+     *   "gpu"      - existing backend based on video/out/gpu
+     *   "gpu-next" - backend based on video/out/gpu_next
+     *
+     * If omitted, defaults to "gpu".
+     */
+    MPV_RENDER_PARAM_BACKEND = 21,
 } mpv_render_param_type;
 
 /**
