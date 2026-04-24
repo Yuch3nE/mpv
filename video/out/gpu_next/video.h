@@ -70,6 +70,12 @@ struct gpu_next_render_result {
     bool has_peak_detect_values;
 };
 
+struct gpu_next_colorspace_hint {
+    bool enabled;
+    bool valid;
+    struct pl_color_space color;
+};
+
 extern const struct m_sub_options gl_next_conf;
 
 gpu_next *gpu_next_init_renderer(struct mpv_global *global,
@@ -96,6 +102,9 @@ void gpu_next_skip_render(gpu_next *p, struct vo_frame *frame);
 bool gpu_next_render_to_target(gpu_next *p, struct vo_frame *frame,
                                struct gpu_next_render_target *target,
                                struct gpu_next_render_result *result);
+struct gpu_next_colorspace_hint gpu_next_get_colorspace_hint(
+    gpu_next *p, struct vo_frame *frame,
+    const struct gpu_next_render_target *target);
 void gpu_next_take_screenshot(gpu_next *p, struct voctrl_screenshot *args);
 void gpu_next_configure_queue(gpu_next *p, struct vo *vo);
 bool gpu_next_update_auto_profile(gpu_next *p, int *events);

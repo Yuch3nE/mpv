@@ -2,11 +2,18 @@
 
 #include "config.h"
 #include "mpv/client.h"
+#if HAVE_D3D11
+#include "mpv/render_dxgi.h"
+#include "video/out/gpu/d3d11_helpers.h"
+#endif
 #include "video/out/gpu/hwdec.h"
 #include "video/out/gpu_next/libmpv_gpu_next.h"
 #include "video/out/gpu_next/video.h"
 
 static const struct libmpv_gpu_next_context_fns *context_backends[] = {
+#if HAVE_D3D11
+    &libmpv_gpu_next_context_d3d11,
+#endif
 #if HAVE_GL
     &libmpv_gpu_next_context_gl,
 #endif
@@ -111,6 +118,71 @@ static int set_parameter(struct render_backend *ctx, mpv_render_param param)
     return MPV_ERROR_NOT_IMPLEMENTED;
 }
 
+static int get_info(struct render_backend *ctx, mpv_render_param param,
+                    struct vo_frame *frame)
+{
+    struct backend_priv *p = ctx->priv;
+
+#if HAVE_D3D11
+    if (param.type == MPV_RENDER_PARAM_DXGI_COLORSPACE_HINT &&
+        p->context->fns->query_target)
+    {
+        mpv_dxgi_colorspace_hint *hint = param.data;
+        *hint = (mpv_dxgi_colorspace_hint){0};
+
+        struct gpu_next_render_target target;
+        int err = p->context->fns->query_target(p->context, &target);
+        if (err < 0)
+            return err;
+
+        struct gpu_next_colorspace_hint res =
+            gpu_next_get_colorspace_hint(p->renderer, frame, &target);
+        if (res.valid) {
+            struct mp_image_params params = {
+                .color = res.color,
+                .repr = pl_color_repr_rgb,
+            };
+            pl_color_space_infer(&params.color);
+            const struct pl_raw_primaries *prim =
+                pl_raw_primaries_get(params.color.primaries);
+            hint->state = MPV_DXGI_COLORSPACE_HINT_SET;
+            hint->color_space = mp_params_to_dxgi_colorspace(ctx->log, &params);
+            hint->bits_per_color = target.color_depth;
+            if (prim) {
+                hint->primaries[0][0] = prim->red.x;
+                hint->primaries[0][1] = prim->red.y;
+                hint->primaries[1][0] = prim->green.x;
+                hint->primaries[1][1] = prim->green.y;
+                hint->primaries[2][0] = prim->blue.x;
+                hint->primaries[2][1] = prim->blue.y;
+                hint->primaries[3][0] = prim->white.x;
+                hint->primaries[3][1] = prim->white.y;
+            }
+            if (pl_primaries_valid(&params.color.hdr.prim)) {
+                hint->primaries[0][0] = params.color.hdr.prim.red.x;
+                hint->primaries[0][1] = params.color.hdr.prim.red.y;
+                hint->primaries[1][0] = params.color.hdr.prim.green.x;
+                hint->primaries[1][1] = params.color.hdr.prim.green.y;
+                hint->primaries[2][0] = params.color.hdr.prim.blue.x;
+                hint->primaries[2][1] = params.color.hdr.prim.blue.y;
+                hint->primaries[3][0] = params.color.hdr.prim.white.x;
+                hint->primaries[3][1] = params.color.hdr.prim.white.y;
+            }
+            hint->min_luma = params.color.hdr.min_luma;
+            hint->max_luma = params.color.hdr.max_luma;
+            hint->max_cll = params.color.hdr.max_cll;
+            hint->max_fall = params.color.hdr.max_fall;
+        } else if (!res.enabled) {
+            hint->state = MPV_DXGI_COLORSPACE_HINT_CLEAR;
+        }
+
+        return 0;
+    }
+#endif
+
+    return MPV_ERROR_NOT_IMPLEMENTED;
+}
+
 static void reconfig(struct render_backend *ctx, struct mp_image_params *params)
 {
     struct backend_priv *p = ctx->priv;
@@ -198,6 +270,7 @@ const struct render_backend_fns render_backend_gpu_next = {
     .init = init,
     .check_format = check_format,
     .set_parameter = set_parameter,
+    .get_info = get_info,
     .reconfig = reconfig,
     .reset = reset,
     .update_external = update_external,

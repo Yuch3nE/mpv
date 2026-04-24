@@ -48,6 +48,9 @@ struct render_backend_fns {
     bool (*check_format)(struct render_backend *ctx, int imgfmt);
     // Implementation of mpv_render_context_set_parameter(). Optional.
     int (*set_parameter)(struct render_backend *ctx, mpv_render_param param);
+    // Implementation of mpv_render_context_get_info(). Optional.
+    int (*get_info)(struct render_backend *ctx, mpv_render_param param,
+                    struct vo_frame *frame);
     // Like vo_driver.reconfig().
     void (*reconfig)(struct render_backend *ctx, struct mp_image_params *params);
     // Like VOCTRL_RESET.

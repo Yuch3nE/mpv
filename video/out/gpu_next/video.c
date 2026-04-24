@@ -877,6 +877,120 @@ static bool set_colorspace_hint(struct priv *p, struct ra_swapchain *sw,
     return false;
 }
 
+struct gpu_next_colorspace_hint gpu_next_get_colorspace_hint(
+    struct priv *p, struct vo_frame *frame,
+    const struct gpu_next_render_target *target)
+{
+    struct gpu_next_colorspace_hint res = {0};
+    const struct gl_video_opts *opts = p->opts_cache->opts;
+    struct pl_color_space target_csp = target->surface_color;
+    if (target_csp.primaries == PL_COLOR_PRIM_UNKNOWN)
+        target_csp.primaries = mp_get_best_prim_container(&target_csp.hdr.prim);
+    if (!pl_color_transfer_is_hdr(target_csp.transfer) &&
+        target_csp.hdr.min_luma > PL_COLOR_SDR_WHITE / PL_COLOR_SDR_CONTRAST)
+        target_csp.hdr.min_luma = 0;
+    target_csp.hdr.max_fall = 0;
+
+    res.enabled = p->next_opts->target_hint == 1 ||
+                  (p->next_opts->target_hint == -1 &&
+                   target_csp.transfer != PL_COLOR_TRC_UNKNOWN);
+    bool target_unknown = target_csp.transfer == PL_COLOR_TRC_UNKNOWN;
+    if (target_unknown) {
+        target_csp = (struct pl_color_space) {
+            .transfer = opts->target_trc ? opts->target_trc
+                                         : pl_color_space_hdr10.transfer,
+        };
+    }
+
+    if (res.enabled && frame->current) {
+        const struct pl_color_space *source = &frame->current->params.color;
+        const struct pl_color_space *target_csp_ref = &target_csp;
+        struct pl_color_space hint = *source;
+        if (!hint.hdr.min_luma)
+            hint.hdr.min_luma = target_csp_ref->hdr.min_luma;
+        if (p->next_opts->target_hint_mode == 0) {
+            hint = *target_csp_ref;
+            if (pl_color_transfer_is_hdr(hint.transfer) &&
+                !pl_primaries_valid(&hint.hdr.prim))
+                pl_color_space_merge(&hint, source);
+            if (target_unknown && !opts->target_trc &&
+                !pl_color_transfer_is_hdr(source->transfer))
+                hint = *source;
+            if (target_csp_ref->hdr.max_luma) {
+                hint.hdr.max_luma = target_csp_ref->hdr.max_luma;
+                hint.hdr.min_luma = target_csp_ref->hdr.min_luma;
+                hint.hdr.max_cll  = target_csp_ref->hdr.max_cll;
+                hint.hdr.max_fall = target_csp_ref->hdr.max_fall;
+            }
+        }
+        if (p->next_opts->target_hint_mode == 2) {
+            pl_color_space_nominal_luma_ex(pl_nominal_luma_params(
+                .color      = &hint,
+                .metadata   = PL_HDR_METADATA_ANY,
+                .scaling    = PL_HDR_NITS,
+                .out_min    = !hint.hdr.min_luma ? &hint.hdr.min_luma : NULL,
+                .out_max    = &hint.hdr.max_luma,
+            ));
+            hint.hdr.max_cll = hint.hdr.max_luma;
+            if (hint.hdr.max_fall > hint.hdr.max_cll)
+                hint.hdr.max_fall = 0;
+        }
+        struct pl_color_space source_csp = *source;
+        pl_color_space_infer_map(&source_csp, &hint);
+        if (pl_color_transfer_is_hdr(target_csp_ref->transfer) && opts->tone_map.inverse) {
+            hint.transfer     = target_csp_ref->transfer;
+            hint.hdr.max_luma = target_csp_ref->hdr.max_luma;
+            hint.hdr.min_luma = target_csp_ref->hdr.min_luma;
+            hint.hdr.max_cll  = target_csp_ref->hdr.max_cll;
+            hint.hdr.max_fall = target_csp_ref->hdr.max_fall;
+        }
+        if (opts->target_prim)
+            hint.primaries = opts->target_prim;
+        if (opts->target_gamut)
+            mp_parse_raw_primaries(mp_null_log, opts->target_gamut, &hint.hdr.prim);
+        if (opts->target_trc)
+            hint.transfer = opts->target_trc;
+        if (opts->target_peak)
+            hint.hdr.max_luma = opts->target_peak;
+        if (opts->hdr_reference_white && !pl_color_transfer_is_hdr(hint.transfer))
+            hint.hdr.max_luma = opts->hdr_reference_white;
+        if (!hint.hdr.max_cll)
+            hint.hdr.max_cll = hint.hdr.max_luma;
+        if (source->hdr.max_luma > hint.hdr.max_luma || opts->tone_map.inverse) {
+            if (!hint.hdr.max_cll || hint.hdr.max_luma < hint.hdr.max_cll ||
+                opts->tone_map.inverse)
+                hint.hdr.max_cll = hint.hdr.max_luma;
+            hint.hdr.max_fall = 0;
+        }
+        if (hint.hdr.max_cll && hint.hdr.max_fall > hint.hdr.max_cll)
+            hint.hdr.max_fall = 0;
+        apply_target_contrast(p, &hint, hint.hdr.min_luma);
+        if (p->icc_profile)
+            hint = p->icc_profile->csp;
+        if (opts->icc_opts->icc_use_luma) {
+            p->icc_params.max_luma = 0.0f;
+        } else {
+            pl_color_space_nominal_luma_ex(pl_nominal_luma_params(
+                .color    = &hint,
+                .metadata = PL_HDR_METADATA_HDR10,
+                .scaling  = PL_HDR_NITS,
+                .out_max  = &p->icc_params.max_luma,
+            ));
+        }
+        pl_icc_update(p->pllog, &p->icc_profile, NULL, &p->icc_params);
+        if (p->icc_profile)
+            hint = p->icc_profile->csp;
+
+        res.valid = true;
+        res.color = hint;
+    } else if (!res.enabled) {
+        if (!res.color.hdr.min_luma)
+            res.color.hdr.min_luma = target_csp.hdr.min_luma;
+    }
+
+    return res;
+}
+
 static void update_tm_viz(struct pl_color_map_params *params,
                           const struct pl_frame *target)
 {
@@ -988,111 +1102,18 @@ bool gpu_next_render_to_target(struct priv *p, struct vo_frame *frame,
         p->last_id = id;
     }
 
+    struct gpu_next_colorspace_hint hint_state =
+        gpu_next_get_colorspace_hint(p, frame, target);
     struct pl_color_space target_csp = target->surface_color;
-    if (target_csp.primaries == PL_COLOR_PRIM_UNKNOWN)
-        target_csp.primaries = mp_get_best_prim_container(&target_csp.hdr.prim);
-    if (!pl_color_transfer_is_hdr(target_csp.transfer) &&
-        target_csp.hdr.min_luma > PL_COLOR_SDR_WHITE / PL_COLOR_SDR_CONTRAST)
-        target_csp.hdr.min_luma = 0;
-    target_csp.hdr.max_fall = 0;
-
-    struct pl_color_space hint = {0};
-    bool target_hint = p->next_opts->target_hint == 1 ||
-                       (p->next_opts->target_hint == -1 &&
-                        target_csp.transfer != PL_COLOR_TRC_UNKNOWN);
     bool target_unknown = target_csp.transfer == PL_COLOR_TRC_UNKNOWN;
-    if (target_unknown) {
-        target_csp = (struct pl_color_space) {
-            .transfer = opts->target_trc ? opts->target_trc
-                                         : pl_color_space_hdr10.transfer,
-        };
-    }
+    struct pl_color_space hint = hint_state.color;
     bool external_params = false;
-    if (target_hint && frame->current) {
-        const struct pl_color_space *source = &frame->current->params.color;
-        const struct pl_color_space *target_csp_ref = &target_csp;
-        hint = *source;
-        if (!hint.hdr.min_luma)
-            hint.hdr.min_luma = target_csp_ref->hdr.min_luma;
-        if (p->next_opts->target_hint_mode == 0) {
-            hint = *target_csp_ref;
-            if (pl_color_transfer_is_hdr(hint.transfer) &&
-                !pl_primaries_valid(&hint.hdr.prim))
-                pl_color_space_merge(&hint, source);
-            if (target_unknown && !opts->target_trc &&
-                !pl_color_transfer_is_hdr(source->transfer))
-                hint = *source;
-            if (target_csp_ref->hdr.max_luma) {
-                hint.hdr.max_luma = target_csp_ref->hdr.max_luma;
-                hint.hdr.min_luma = target_csp_ref->hdr.min_luma;
-                hint.hdr.max_cll  = target_csp_ref->hdr.max_cll;
-                hint.hdr.max_fall = target_csp_ref->hdr.max_fall;
-            }
-        }
-        if (p->next_opts->target_hint_mode == 2) {
-            pl_color_space_nominal_luma_ex(pl_nominal_luma_params(
-                .color      = &hint,
-                .metadata   = PL_HDR_METADATA_ANY,
-                .scaling    = PL_HDR_NITS,
-                .out_min    = !hint.hdr.min_luma ? &hint.hdr.min_luma : NULL,
-                .out_max    = &hint.hdr.max_luma,
-            ));
-            hint.hdr.max_cll = hint.hdr.max_luma;
-            if (hint.hdr.max_fall > hint.hdr.max_cll)
-                hint.hdr.max_fall = 0;
-        }
-        struct pl_color_space source_csp = *source;
-        pl_color_space_infer_map(&source_csp, &hint);
-        if (pl_color_transfer_is_hdr(target_csp_ref->transfer) && opts->tone_map.inverse) {
-            hint.transfer     = target_csp_ref->transfer;
-            hint.hdr.max_luma = target_csp_ref->hdr.max_luma;
-            hint.hdr.min_luma = target_csp_ref->hdr.min_luma;
-            hint.hdr.max_cll  = target_csp_ref->hdr.max_cll;
-            hint.hdr.max_fall = target_csp_ref->hdr.max_fall;
-        }
-        if (opts->target_prim)
-            hint.primaries = opts->target_prim;
-        if (opts->target_gamut)
-            mp_parse_raw_primaries(mp_null_log, opts->target_gamut, &hint.hdr.prim);
-        if (opts->target_trc)
-            hint.transfer = opts->target_trc;
-        if (opts->target_peak)
-            hint.hdr.max_luma = opts->target_peak;
-        if (opts->hdr_reference_white && !pl_color_transfer_is_hdr(hint.transfer))
-            hint.hdr.max_luma = opts->hdr_reference_white;
-        if (!hint.hdr.max_cll)
-            hint.hdr.max_cll = hint.hdr.max_luma;
-        if (source->hdr.max_luma > hint.hdr.max_luma || opts->tone_map.inverse) {
-            if (!hint.hdr.max_cll || hint.hdr.max_luma < hint.hdr.max_cll ||
-                opts->tone_map.inverse)
-                hint.hdr.max_cll = hint.hdr.max_luma;
-            hint.hdr.max_fall = 0;
-        }
-        if (hint.hdr.max_cll && hint.hdr.max_fall > hint.hdr.max_cll)
-            hint.hdr.max_fall = 0;
-        apply_target_contrast(p, &hint, hint.hdr.min_luma);
-        if (p->icc_profile)
-            hint = p->icc_profile->csp;
-        if (opts->icc_opts->icc_use_luma) {
-            p->icc_params.max_luma = 0.0f;
-        } else {
-            pl_color_space_nominal_luma_ex(pl_nominal_luma_params(
-                .color    = &hint,
-                .metadata = PL_HDR_METADATA_HDR10,
-                .scaling  = PL_HDR_NITS,
-                .out_max  = &p->icc_params.max_luma,
-            ));
-        }
-        pl_icc_update(p->pllog, &p->icc_profile, NULL, &p->icc_params);
-        if (p->icc_profile)
-            hint = p->icc_profile->csp;
+    if (hint_state.valid) {
         if (target->allow_color_hint) {
             external_params = set_colorspace_hint(p, target->ra_swapchain,
                                                   target->swapchain, &hint);
         }
-    } else if (!target_hint) {
-        if (!hint.hdr.min_luma)
-            hint.hdr.min_luma = target_csp.hdr.min_luma;
+    } else if (!hint_state.enabled) {
         if (target->allow_color_hint) {
             external_params = set_colorspace_hint(p, target->ra_swapchain,
                                                   target->swapchain, NULL);
@@ -1105,7 +1126,7 @@ bool gpu_next_render_to_target(struct priv *p, struct vo_frame *frame,
     struct pl_frame target_frame = target->frame;
     if (external_params)
         target_frame.color = hint;
-    bool strict_sw_params = target_hint && p->next_opts->target_hint_strict;
+    bool strict_sw_params = hint_state.enabled && p->next_opts->target_hint_strict;
     apply_target_options(p, &target_frame, hint.hdr.min_luma, strict_sw_params,
                          target->color_depth);
     bool clip_gamut = pl_primaries_valid(&target_frame.color.hdr.prim);

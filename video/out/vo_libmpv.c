@@ -491,7 +491,11 @@ int mpv_render_context_get_info(mpv_render_context *ctx,
         res = 0;
         break;
     }
-    default:;
+    default:
+        if (ctx->renderer->fns->get_info)
+            res = ctx->renderer->fns->get_info(ctx->renderer, param,
+                                               ctx->next_frame);
+        break;
     }
 
     mp_mutex_unlock(&ctx->lock);

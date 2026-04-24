@@ -188,6 +188,10 @@ typedef enum mpv_render_param_type {
      *      It is expected that an OpenGL context is valid and "current" when
      *      calling mpv_render_* functions (unless specified otherwise). It
      *      must be the same context for the same mpv_render_context.
+    *
+    *   MPV_RENDER_API_TYPE_DXGI:
+    *      Direct3D 11 via a DXGI swapchain.
+    *      Providing MPV_RENDER_PARAM_DXGI_INIT_PARAMS is required.
      */
     MPV_RENDER_PARAM_API_TYPE = 1,
     /**
@@ -434,6 +438,22 @@ typedef enum mpv_render_param_type {
      * If omitted, defaults to "gpu".
      */
     MPV_RENDER_PARAM_BACKEND = 21,
+    /**
+     * Required parameters for initializing the DXGI renderer. Valid for
+     * mpv_render_context_create().
+     * Type: mpv_dxgi_init_params*
+     */
+    MPV_RENDER_PARAM_DXGI_INIT_PARAMS = 22,
+    /**
+     * Return the gpu-next colorspace hint for a DXGI render target.
+     * Valid for mpv_render_context_get_info().
+     * Type: mpv_dxgi_colorspace_hint*
+     *
+     * This is intended for MPV_RENDER_API_TYPE_DXGI with the "gpu-next"
+     * backend. It provides the colorspace state that mpv would like the host
+     * to apply to its swapchain before rendering the next frame.
+     */
+    MPV_RENDER_PARAM_DXGI_COLORSPACE_HINT = 23,
 } mpv_render_param_type;
 
 /**
@@ -480,6 +500,8 @@ typedef struct mpv_render_param {
 #define MPV_RENDER_API_TYPE_OPENGL "opengl"
 // See section "Software renderer"
 #define MPV_RENDER_API_TYPE_SW "sw"
+// See render_dxgi.h
+#define MPV_RENDER_API_TYPE_DXGI "dxgi"
 
 /**
  * Flags used in mpv_render_frame_info.flags. Each value represents a bit in it.

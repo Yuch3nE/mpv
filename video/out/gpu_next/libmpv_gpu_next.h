@@ -22,6 +22,8 @@ struct libmpv_gpu_next_context {
 struct libmpv_gpu_next_context_fns {
     const char *api_name;
     int (*init)(struct libmpv_gpu_next_context *ctx, mpv_render_param *params);
+    int (*query_target)(struct libmpv_gpu_next_context *ctx,
+                        struct gpu_next_render_target *out);
     int (*wrap_target)(struct libmpv_gpu_next_context *ctx,
                        mpv_render_param *params,
                        struct gpu_next_render_target *out);
@@ -30,3 +32,4 @@ struct libmpv_gpu_next_context_fns {
 };
 
 extern const struct libmpv_gpu_next_context_fns libmpv_gpu_next_context_gl;
+extern const struct libmpv_gpu_next_context_fns libmpv_gpu_next_context_d3d11;
