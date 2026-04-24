@@ -1,3 +1,20 @@
+/*
+ * This file is part of mpv.
+ *
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * mpv is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with mpv.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #pragma once
 
 #include <stdbool.h>
@@ -60,7 +77,6 @@ struct gpu_next_render_target {
     pl_swapchain swapchain;
     struct pl_color_space surface_color;
     int color_depth;
-    bool allow_color_hint;
     bool flip_y;
 };
 
@@ -82,8 +98,11 @@ gpu_next *gpu_next_init_renderer(struct mpv_global *global,
                                  struct mp_log *log, struct ra_ctx *ra_ctx,
                                  pl_log pllog, pl_gpu gpu, pl_swapchain sw,
                                  struct mp_hwdec_devices *hwdec_devs,
+                                 bool load_all_hwdecs,
                                  const char *stats_name);
 void gpu_next_uninit_renderer(gpu_next *p);
+void gpu_next_set_icc_profile(gpu_next *p, struct bstr profile);
+void gpu_next_set_ambient_lux(gpu_next *p, double lux);
 void gpu_next_set_osd_source(gpu_next *p, struct osd_state *osd);
 void gpu_next_set_video_params(gpu_next *p,
                                const struct mp_image_params *params);

@@ -1,3 +1,20 @@
+/*
+ * This file is part of mpv.
+ *
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * mpv is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with mpv.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #pragma once
 
 #include "video.h"
@@ -24,6 +41,13 @@ struct cache {
     const char *name;
     size_t size_limit;
     pl_cache cache;
+};
+
+struct frame_priv {
+    struct priv *p;
+    struct gpu_next_osd_state subs;
+    uint64_t osd_sync;
+    struct ra_hwdec *hwdec;
 };
 
 struct priv {
@@ -84,4 +108,7 @@ struct priv {
 
     struct mp_image_params target_params;
     struct mp_image_params video_params;
+
+    double ambient_lux;
+    bool warned_no_color_hint;
 };

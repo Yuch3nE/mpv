@@ -1,3 +1,20 @@
+/*
+ * This file is part of mpv.
+ *
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * mpv is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with mpv.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include <stdlib.h>
 
 #include <libplacebo/opengl.h>
@@ -21,6 +38,10 @@ struct priv {
     struct ra_ctx *ra_ctx;
     pl_opengl opengl;
     pl_tex wrapped_target;
+    int wrapped_fbo;
+    int wrapped_w;
+    int wrapped_h;
+    int wrapped_iformat;
 };
 
 static void destroy_wrapped_target(struct libmpv_gpu_next_context *ctx)
@@ -30,6 +51,10 @@ static void destroy_wrapped_target(struct libmpv_gpu_next_context *ctx)
         return;
 
     pl_tex_destroy(ctx->gpu, &p->wrapped_target);
+    p->wrapped_fbo = 0;
+    p->wrapped_w = 0;
+    p->wrapped_h = 0;
+    p->wrapped_iformat = 0;
 }
 
 static int init(struct libmpv_gpu_next_context *ctx, mpv_render_param *params)
@@ -112,33 +137,59 @@ static int wrap_target(struct libmpv_gpu_next_context *ctx,
         return MPV_ERROR_UNSUPPORTED;
     }
 
-    destroy_wrapped_target(ctx);
-    p->wrapped_target = pl_opengl_wrap(ctx->gpu, pl_opengl_wrap_params(
-        .framebuffer = fbo->fbo,
-        .width = fbo->w,
-        .height = abs(fbo->h),
-        .iformat = fbo->internal_format
-    ));
-    if (!p->wrapped_target)
-        return MPV_ERROR_GENERIC;
+    int width = fbo->w;
+    int height = abs(fbo->h);
+    if (p->wrapped_target &&
+        (p->wrapped_fbo != fbo->fbo ||
+         p->wrapped_w != width ||
+         p->wrapped_h != height ||
+         p->wrapped_iformat != fbo->internal_format))
+    {
+        destroy_wrapped_target(ctx);
+    }
 
+    if (!p->wrapped_target) {
+        p->wrapped_target = pl_opengl_wrap(ctx->gpu, pl_opengl_wrap_params(
+            .framebuffer = fbo->fbo,
+            .width = width,
+            .height = height,
+            .iformat = fbo->internal_format
+        ));
+        if (!p->wrapped_target)
+            return MPV_ERROR_GENERIC;
+        p->wrapped_fbo = fbo->fbo;
+        p->wrapped_w = width;
+        p->wrapped_h = height;
+        p->wrapped_iformat = fbo->internal_format;
+    }
+
+    int components = 4;
+    if (p->wrapped_target->params.format)
+        components = p->wrapped_target->params.format->num_components;
+
+    // The libmpv render API does not negotiate any surface color information
+    // with the host application. Leave the surface color space and the target
+    // frame color as PL_COLOR_*_UNKNOWN so that the shared renderer drives
+    // the output entirely from the mpv options (target-prim, target-trc,
+    // target-peak, ...), mirroring how vo=libmpv with the gpu backend
+    // behaves. ra_swapchain and swapchain are NULL so the renderer will
+    // automatically skip any color space hint negotiation.
     *out = (struct gpu_next_render_target) {
         .frame = {
-            .color = pl_color_space_srgb,
+            .color = {0},
             .repr = pl_color_repr_rgb,
             .num_planes = 1,
             .planes = {
                 {
                     .texture = p->wrapped_target,
-                    .components = 4,
+                    .components = components,
                     .component_mapping = {0, 1, 2, 3},
                 },
             },
         },
-        .surface_color = pl_color_space_srgb,
+        .surface_color = {0},
         .color_depth = GET_MPV_RENDER_PARAM(params, MPV_RENDER_PARAM_DEPTH,
                                             int, 0),
-        .allow_color_hint = false,
         .flip_y = GET_MPV_RENDER_PARAM(params, MPV_RENDER_PARAM_FLIP_Y,
                                        int, 0),
     };
@@ -147,7 +198,9 @@ static int wrap_target(struct libmpv_gpu_next_context *ctx,
 
 static void done_frame(struct libmpv_gpu_next_context *ctx, bool ds)
 {
-    destroy_wrapped_target(ctx);
+    // The wrapped target survives across frames so subsequent renders can
+    // reuse it cheaply. It is invalidated on demand in wrap_target() and on
+    // destroy().
 }
 
 static void destroy(struct libmpv_gpu_next_context *ctx)

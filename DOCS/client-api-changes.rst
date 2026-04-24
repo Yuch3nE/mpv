@@ -33,6 +33,10 @@ API changes
 ::
 
  --- mpv 0.40.0 ---
+ 2.6    - add MPV_RENDER_PARAM_BACKEND. Selects the libmpv internal render
+          backend implementation. Recognised values are "gpu" (default,
+          existing behavior) and "gpu-next" (libplacebo-based renderer
+          shared with vo=gpu-next).
  2.5    - Deprecate MPV_RENDER_PARAM_AMBIENT_LIGHT. no replacement.
  --- mpv 0.39.0 ---
  2.4    - mpv_render_param with the MPV_RENDER_PARAM_ICC_PROFILE argument no
