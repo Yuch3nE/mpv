@@ -1,3 +1,20 @@
+/*
+ * This file is part of mpv.
+ *
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * mpv is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with mpv.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include <limits.h>
 #include <math.h>
 #include <stdbool.h>
@@ -16,6 +33,7 @@
 
 #include "cache.h"
 #include "color.h"
+#include "hwdec.h"
 #include "private.h"
 #include "user_shaders.h"
 
@@ -206,12 +224,6 @@ bool gpu_next_submit_frame(struct priv *p)
     return pl_swapchain_submit_frame(p->sw);
 }
 
-void gpu_next_load_hwdec_api(struct priv *p, struct mp_hwdec_devices *hwdec_devs,
-                             void *data)
-{
-    ra_hwdec_ctx_load_fmt(&p->hwdec_ctx, hwdec_devs, data);
-}
-
 static inline void copy_frame_info_to_mp(struct frame_info *pl,
                                          struct mp_frame_perf *mp,
                                          struct mp_pass_perf *hwdec_perf,
@@ -268,6 +280,7 @@ gpu_next *gpu_next_init_renderer(struct mpv_global *global,
                                  struct mp_log *log, struct ra_ctx *ra_ctx,
                                  pl_log pllog, pl_gpu gpu, pl_swapchain sw,
                                  struct mp_hwdec_devices *hwdec_devs,
+                                 bool load_all_hwdecs,
                                  const char *stats_name)
 {
     gpu_next *p = talloc_zero(NULL, struct priv);
@@ -290,9 +303,10 @@ gpu_next *gpu_next_init_renderer(struct mpv_global *global,
     };
 
     const struct gl_video_opts *gl_opts = p->opts_cache->opts;
-    if (hwdec_devs)
+    if (hwdec_devs) {
         ra_hwdec_ctx_init(&p->hwdec_ctx, hwdec_devs, gl_opts->hwdec_interop,
-                          false);
+                          load_all_hwdecs);
+    }
     mp_mutex_init(&p->dr_lock);
 
     if (gl_opts->shader_cache)
@@ -310,7 +324,6 @@ gpu_next *gpu_next_init_renderer(struct mpv_global *global,
     p->pars = pl_options_alloc(p->pllog);
     if (!p->rr || !p->queue || !p->pars) {
         gpu_next_uninit_renderer(p);
-        talloc_free(p);
         return NULL;
     }
 
@@ -320,6 +333,9 @@ gpu_next *gpu_next_init_renderer(struct mpv_global *global,
 
 void gpu_next_uninit_renderer(struct priv *p)
 {
+    if (!p)
+        return;
+
     pl_queue_destroy(&p->queue);
     for (int i = 0; i < MP_ARRAY_SIZE(p->osd_state.entries); i++)
         pl_tex_destroy(p->gpu, &p->osd_state.entries[i].tex);
@@ -357,6 +373,26 @@ void gpu_next_uninit_renderer(struct priv *p)
     p->pllog = NULL;
     p->gpu = NULL;
     p->sw = NULL;
+
+    talloc_free(p);
+}
+
+void gpu_next_set_ambient_lux(struct priv *p, double lux)
+{
+    if (!p)
+        return;
+    // gpu-next does not currently consume ambient light data, but accept it
+    // for API compatibility with the gpu backend (and potential future use).
+    p->ambient_lux = lux;
+}
+
+void gpu_next_set_icc_profile(struct priv *p, struct bstr profile)
+{
+    if (!p) {
+        talloc_free(profile.start);
+        return;
+    }
+    gpu_next_set_icc_profile_data(p, profile);
 }
 
 void gpu_next_request_reset(struct priv *p)
@@ -368,13 +404,6 @@ bool gpu_next_showing_interpolated_frame(struct priv *p)
 {
     return p->is_interpolated;
 }
-
-struct frame_priv {
-    struct priv *p;
-    struct gpu_next_osd_state subs;
-    uint64_t osd_sync;
-    struct ra_hwdec *hwdec;
-};
 
 static int plane_data_from_imgfmt(struct pl_plane_data out_data[4],
                                   struct pl_bit_encoding *out_bits,
@@ -472,118 +501,6 @@ static pl_buf get_dr_buf(struct priv *p, const uint8_t *ptr)
     return NULL;
 }
 
-static bool hwdec_reconfig(struct priv *p, struct ra_hwdec *hwdec,
-                           const struct mp_image_params *par)
-{
-    if (p->hwdec_mapper) {
-        if (mp_image_params_static_equal(par, &p->hwdec_mapper->src_params)) {
-            p->hwdec_mapper->src_params.repr.dovi = par->repr.dovi;
-            p->hwdec_mapper->dst_params.repr.dovi = par->repr.dovi;
-            p->hwdec_mapper->src_params.color.hdr = par->color.hdr;
-            p->hwdec_mapper->dst_params.color.hdr = par->color.hdr;
-            return p->hwdec_mapper;
-        }
-        ra_hwdec_mapper_free(&p->hwdec_mapper);
-        timer_pool_destroy(p->hwdec_timer);
-        p->hwdec_timer = NULL;
-    }
-
-    p->hwdec_mapper = ra_hwdec_mapper_create(hwdec, par);
-    if (!p->hwdec_mapper) {
-        MP_ERR(p, "Initializing texture for hardware decoding failed.\n");
-        return NULL;
-    }
-    p->hwdec_timer = timer_pool_create(p->ra_ctx->ra);
-
-    return p->hwdec_mapper;
-}
-
-static pl_tex hwdec_get_tex(struct priv *p, int n)
-{
-    struct ra_tex *ratex = p->hwdec_mapper->tex[n];
-    struct ra *ra = p->hwdec_mapper->ra;
-    if (ra_pl_get(ra))
-        return (pl_tex)ratex->priv;
-
-#if HAVE_GL && defined(PL_HAVE_OPENGL)
-    if (ra_is_gl(ra) && pl_opengl_get(p->gpu)) {
-        struct pl_opengl_wrap_params par = {
-            .width = ratex->params.w,
-            .height = ratex->params.h,
-        };
-
-        ra_gl_get_format(ratex->params.format, &par.iformat,
-                         &(GLenum){0}, &(GLenum){0});
-        ra_gl_get_raw_tex(ra, ratex, &par.texture, &par.target);
-        return pl_opengl_wrap(p->gpu, &par);
-    }
-#endif
-
-#if HAVE_D3D11 && defined(PL_HAVE_D3D11)
-    if (ra_is_d3d11(ra)) {
-        int array_slice = 0;
-        ID3D11Resource *res = ra_d3d11_get_raw_tex(ra, ratex, &array_slice);
-        pl_tex tex = pl_d3d11_wrap(p->gpu, pl_d3d11_wrap_params(
-            .tex = res,
-            .array_slice = array_slice,
-            .fmt = ra_d3d11_get_format(ratex->params.format),
-            .w = ratex->params.w,
-            .h = ratex->params.h,
-        ));
-        SAFE_RELEASE(res);
-        return tex;
-    }
-#endif
-
-    MP_ERR(p, "Failed mapping hwdec frame? Open a bug!\n");
-    return false;
-}
-
-static bool hwdec_acquire(pl_gpu gpu, struct pl_frame *frame)
-{
-    struct mp_image *mpi = frame->user_data;
-    struct frame_priv *fp = mpi->priv;
-    struct priv *p = fp->p;
-    if (!hwdec_reconfig(p, fp->hwdec, &mpi->params))
-        return false;
-
-    stats_time_start(p->stats, "hwdec-map");
-    timer_pool_start(p->hwdec_timer);
-    if (ra_hwdec_mapper_map(p->hwdec_mapper, mpi) < 0) {
-        MP_ERR(p, "Mapping hardware decoded surface failed.\n");
-        timer_pool_stop(p->hwdec_timer);
-        stats_time_end(p->stats, "hwdec-map");
-        return false;
-    }
-
-    for (int n = 0; n < frame->num_planes; n++) {
-        if (!(frame->planes[n].texture = hwdec_get_tex(p, n))) {
-            timer_pool_stop(p->hwdec_timer);
-            stats_time_end(p->stats, "hwdec-map");
-            return false;
-        }
-    }
-
-    timer_pool_stop(p->hwdec_timer);
-    p->hwdec_perf = timer_pool_measure(p->hwdec_timer);
-    stats_time_end(p->stats, "hwdec-map");
-
-    return true;
-}
-
-static void hwdec_release(pl_gpu gpu, struct pl_frame *frame)
-{
-    struct mp_image *mpi = frame->user_data;
-    struct frame_priv *fp = mpi->priv;
-    struct priv *p = fp->p;
-    if (!ra_pl_get(p->hwdec_mapper->ra)) {
-        for (int n = 0; n < frame->num_planes; n++)
-            pl_tex_destroy(p->gpu, &frame->planes[n].texture);
-    }
-
-    ra_hwdec_mapper_unmap(p->hwdec_mapper);
-}
-
 static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src,
                       struct pl_frame *frame)
 {
@@ -594,7 +511,7 @@ static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src
 
     fp->hwdec = ra_hwdec_get(&p->hwdec_ctx, mpi->imgfmt);
     if (fp->hwdec) {
-        if (!hwdec_reconfig(p, fp->hwdec, &mpi->params)) {
+        if (!gpu_next_hwdec_reconfig(p, fp->hwdec, &mpi->params)) {
             talloc_free(mpi);
             return false;
         }
@@ -626,8 +543,8 @@ static bool map_frame(pl_gpu gpu, pl_tex *tex, const struct pl_source_frame *src
         p->sw_upload_perf.count = 0;
 
         struct mp_imgfmt_desc desc = mp_imgfmt_get_desc(par.imgfmt);
-        frame->acquire = hwdec_acquire;
-        frame->release = hwdec_release;
+        frame->acquire = gpu_next_hwdec_acquire;
+        frame->release = gpu_next_hwdec_release;
         frame->num_planes = desc.num_planes;
         for (int n = 0; n < frame->num_planes; n++) {
             struct pl_plane *plane = &frame->planes[n];
@@ -1000,6 +917,13 @@ bool gpu_next_render_to_target(struct priv *p, struct vo_frame *frame,
     bool target_hint = p->next_opts->target_hint == 1 ||
                        (p->next_opts->target_hint == -1 &&
                         target_csp.transfer != PL_COLOR_TRC_UNKNOWN);
+    bool can_hint = target->ra_swapchain || target->swapchain;
+    if (target_hint && !can_hint && !p->warned_no_color_hint) {
+        MP_VERBOSE(p, "target-colorspace-hint requested but the current render "
+                      "backend cannot push a color space hint to the surface; "
+                      "the host application must configure the surface itself.\n");
+        p->warned_no_color_hint = true;
+    }
     bool target_unknown = target_csp.transfer == PL_COLOR_TRC_UNKNOWN;
     if (target_unknown) {
         target_csp = (struct pl_color_space) {
@@ -1086,14 +1010,14 @@ bool gpu_next_render_to_target(struct priv *p, struct vo_frame *frame,
         pl_icc_update(p->pllog, &p->icc_profile, NULL, &p->icc_params);
         if (p->icc_profile)
             hint = p->icc_profile->csp;
-        if (target->allow_color_hint) {
+        if (can_hint) {
             external_params = set_colorspace_hint(p, target->ra_swapchain,
                                                   target->swapchain, &hint);
         }
     } else if (!target_hint) {
         if (!hint.hdr.min_luma)
             hint.hdr.min_luma = target_csp.hdr.min_luma;
-        if (target->allow_color_hint) {
+        if (can_hint) {
             external_params = set_colorspace_hint(p, target->ra_swapchain,
                                                   target->swapchain, NULL);
         }

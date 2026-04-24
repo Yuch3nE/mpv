@@ -1,10 +1,58 @@
+/*
+ * This file is part of mpv.
+ *
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * mpv is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with mpv.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include <string.h>
 
 #include "config.h"
+#include "misc/bstr.h"
 #include "mpv/client.h"
+#include "mpv/render_gl.h"
 #include "video/out/gpu/hwdec.h"
+#include "video/out/gpu/ra.h"
 #include "video/out/gpu_next/libmpv_gpu_next.h"
 #include "video/out/gpu_next/video.h"
+#include "video/out/libmpv.h"
+
+struct native_resource_entry {
+    const char *name;   // ra_add_native_resource() internal name
+    size_t size;        // size of struct pointed to (0 for no copy)
+};
+
+// Mirrors gpu/libmpv_gpu.c:native_resource_map so that hwdec backends which
+// rely on host-provided native resources (X11 display, Wayland display, DRM
+// params, ...) work the same way under the gpu-next libmpv backend.
+static const struct native_resource_entry native_resource_map[] = {
+    [MPV_RENDER_PARAM_X11_DISPLAY] = {
+        .name = "x11",
+        .size = 0,
+    },
+    [MPV_RENDER_PARAM_WL_DISPLAY] = {
+        .name = "wl",
+        .size = 0,
+    },
+    [MPV_RENDER_PARAM_DRM_DRAW_SURFACE_SIZE] = {
+        .name = "drm_draw_surface_size",
+        .size = sizeof(mpv_opengl_drm_draw_surface_size),
+    },
+    [MPV_RENDER_PARAM_DRM_DISPLAY_V2] = {
+        .name = "drm_params_v2",
+        .size = sizeof(mpv_opengl_drm_params_v2),
+    },
+};
 
 static const struct libmpv_gpu_next_context_fns *context_backends[] = {
 #if HAVE_GL
@@ -37,7 +85,6 @@ static void cleanup_backend(struct render_backend *ctx)
 
     if (p->renderer) {
         gpu_next_uninit_renderer(p->renderer);
-        talloc_free(p->renderer);
         p->renderer = NULL;
     }
 
@@ -84,12 +131,28 @@ static int init(struct render_backend *ctx, mpv_render_param *params)
         return err;
     }
 
+    // Forward host-provided native resources (X11/Wayland/DRM) to the ra used
+    // by the shared hwdec context, matching the gpu backend behavior.
+    for (int n = 0; params && params[n].type; n++) {
+        if (params[n].type > 0 &&
+            params[n].type < MP_ARRAY_SIZE(native_resource_map) &&
+            native_resource_map[params[n].type].name)
+        {
+            const struct native_resource_entry *entry =
+                &native_resource_map[params[n].type];
+            void *data = params[n].data;
+            if (entry->size)
+                data = talloc_memdup(p, data, entry->size);
+            ra_add_native_resource(p->context->ra_ctx->ra, entry->name, data);
+        }
+    }
+
     ctx->hwdec_devs = hwdec_devices_create();
     p->renderer = gpu_next_init_renderer(ctx->global, ctx->log,
                                          p->context->ra_ctx,
                                          p->context->pllog,
                                          p->context->gpu, NULL,
-                                         ctx->hwdec_devs,
+                                         ctx->hwdec_devs, true,
                                          "libmpv/gpu-next");
     if (!p->renderer) {
         cleanup_backend(ctx);
@@ -108,7 +171,25 @@ static bool check_format(struct render_backend *ctx, int imgfmt)
 
 static int set_parameter(struct render_backend *ctx, mpv_render_param param)
 {
-    return MPV_ERROR_NOT_IMPLEMENTED;
+    struct backend_priv *p = ctx->priv;
+
+    switch (param.type) {
+    case MPV_RENDER_PARAM_ICC_PROFILE: {
+        mpv_byte_array *data = param.data;
+        gpu_next_set_icc_profile(p->renderer,
+                                 bstrdup(NULL, (bstr){data->data, data->size}));
+        return 0;
+    }
+    case MPV_RENDER_PARAM_AMBIENT_LIGHT: {
+        MP_WARN(ctx, "MPV_RENDER_PARAM_AMBIENT_LIGHT is deprecated and might be "
+                     "removed in the future (replacement: gamma-auto.lua)\n");
+        int lux = *(int *)param.data;
+        gpu_next_set_ambient_lux(p->renderer, (double)lux);
+        return 0;
+    }
+    default:
+        return MPV_ERROR_NOT_IMPLEMENTED;
+    }
 }
 
 static void reconfig(struct render_backend *ctx, struct mp_image_params *params)
@@ -163,9 +244,9 @@ static int render(struct render_backend *ctx, mpv_render_param *params,
         return err;
 
     struct gpu_next_render_result result;
-    gpu_next_render_to_target(p->renderer, frame, &target, &result);
+    bool ok = gpu_next_render_to_target(p->renderer, frame, &target, &result);
     p->context->fns->done_frame(p->context, frame->display_synced);
-    return 0;
+    return ok ? 0 : MPV_ERROR_GENERIC;
 }
 
 static struct mp_image *get_image(struct render_backend *ctx, int imgfmt,

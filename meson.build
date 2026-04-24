@@ -260,6 +260,7 @@ sources = files(
     'video/out/gpu_next/cache.c',
     'video/out/gpu_next/color.c',
     'video/out/gpu_next/context.c',
+    'video/out/gpu_next/hwdec.c',
     'video/out/gpu_next/libmpv_gpu_next.c',
     'video/out/gpu_next/osd.c',
     'video/out/gpu_next/user_shaders.c',

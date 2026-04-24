@@ -101,7 +101,7 @@ static int preinit(struct vo *vo)
     p->renderer = gpu_next_init_renderer(vo->global, vo->log, p->ra_ctx,
                                          p->context->pllog, p->context->gpu,
                                          p->context->swapchain,
-                                         vo->hwdec_devs, "vo/gpu-next");
+                                         vo->hwdec_devs, false, "vo/gpu-next");
     if (!p->renderer)
         goto err_out;
 
@@ -117,7 +117,6 @@ err_out:
     }
     if (p->renderer) {
         gpu_next_uninit_renderer(p->renderer);
-        talloc_free(p->renderer);
         p->renderer = NULL;
     }
     gpu_ctx_destroy(&p->context);
@@ -136,7 +135,6 @@ static void uninit(struct vo *vo)
 
     if (p->renderer) {
         gpu_next_uninit_renderer(p->renderer);
-        talloc_free(p->renderer);
         p->renderer = NULL;
     }
 
@@ -166,7 +164,6 @@ static bool draw_frame(struct vo *vo, struct vo_frame *frame)
         .surface_color = sw->fns->target_csp ? sw->fns->target_csp(sw)
                                              : (struct pl_color_space){0},
         .color_depth = sw->fns->color_depth ? sw->fns->color_depth(sw) : 0,
-        .allow_color_hint = true,
         .flip_y = false,
     };
     pl_frame_from_swapchain(&target.frame, &swframe);

@@ -1,3 +1,20 @@
+/*
+ * This file is part of mpv.
+ *
+ * mpv is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * mpv is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with mpv.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
 #include <string.h>
 
 #include "options/path.h"
@@ -17,6 +34,14 @@ static bool update_icc(struct priv *p, struct bstr icc)
     bool ok = pl_icc_update(p->pllog, &p->icc_profile, &profile, &p->icc_params);
     talloc_free(icc.start);
     return ok;
+}
+
+void gpu_next_set_icc_profile_data(struct priv *p, struct bstr profile)
+{
+    // Take ownership of profile.start, replacing any auto-loaded ICC data
+    // and inhibiting future auto-profile updates from overriding it.
+    update_icc(p, profile);
+    TA_FREEP(&p->icc_path);
 }
 
 bool gpu_next_update_auto_profile(struct priv *p, int *events)
