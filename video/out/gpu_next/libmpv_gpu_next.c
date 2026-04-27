@@ -59,6 +59,9 @@ static const struct native_resource_entry native_resource_map[] = {
 };
 
 static const struct libmpv_gpu_next_context_fns *context_backends[] = {
+#if HAVE_VULKAN
+    &libmpv_gpu_next_context_vk,
+#endif
 #if HAVE_D3D11
     &libmpv_gpu_next_context_d3d11,
 #endif
@@ -295,6 +298,10 @@ static int get_target_size(struct render_backend *ctx, mpv_render_param *params,
                            int *out_w, int *out_h)
 {
     struct backend_priv *p = ctx->priv;
+    if (p->context->fns->get_target_size)
+        return p->context->fns->get_target_size(p->context, params,
+                                                out_w, out_h);
+
     struct gpu_next_render_target target;
     int err = p->context->fns->wrap_target(p->context, params, &target);
     if (err < 0)

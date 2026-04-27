@@ -16,6 +16,7 @@
 #ifndef MPV_CLIENT_API_RENDER_VK_H_
 #define MPV_CLIENT_API_RENDER_VK_H_
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "render.h"
@@ -39,9 +40,9 @@ extern "C" {
  * Unlike MPV_RENDER_API_TYPE_OPENGL, the Vulkan backend does not own the
  * graphics device. The host MUST supply a fully created VkInstance,
  * VkPhysicalDevice, and VkDevice through MPV_RENDER_PARAM_VULKAN_INIT_PARAMS,
- * together with the queue family/index that mpv (and libplacebo) is allowed
- * to submit work to. The same VkDevice must remain valid for the entire
- * lifetime of the mpv_render_context.
+ * together with the queue family/count information and the exact enabled
+ * Vulkan feature chain that the VkDevice was created with. The same VkDevice
+ * must remain valid for the entire lifetime of the mpv_render_context.
  *
  * Reusing the host VkDevice (instead of creating a new one) is mandatory for
  * any zero-copy interop, e.g. importing MTLTexture / DXGI / dma-buf objects
@@ -94,18 +95,21 @@ typedef struct mpv_vulkan_init_params {
     void *device;
 
     /**
-     * Index of the queue family on phys_device that mpv is allowed to submit
-     * graphics + compute work to. The queue family must support both
-     * VK_QUEUE_GRAPHICS_BIT and VK_QUEUE_COMPUTE_BIT.
+     * Index of the queue family on phys_device that mpv/libplacebo is allowed
+     * to submit graphics + compute work to. The queue family must support
+     * both VK_QUEUE_GRAPHICS_BIT and VK_QUEUE_COMPUTE_BIT.
      */
     uint32_t queue_family_index;
 
     /**
-     * Index of the queue inside queue_family_index that mpv may use. The host
-     * must not use this same VkQueue concurrently with mpv_render_*
-     * functions; the recommended pattern is to dedicate one VkQueue to mpv.
+     * Number of queues that were enabled from queue_family_index when `device`
+     * was created. This is required because libplacebo imports queue families,
+     * not a single VkQueue handle.
+     *
+     * If the host wants mpv to use a dedicated queue, it should create the
+     * VkDevice with exactly one queue enabled in this family and pass 1 here.
      */
-    uint32_t queue_index;
+    uint32_t queue_count;
 
     /**
      * Required: function pointer to vkGetInstanceProcAddr for the loader the
@@ -117,6 +121,19 @@ typedef struct mpv_vulkan_init_params {
      * Type: PFN_vkGetInstanceProcAddr.
      */
     void *get_proc_addr;
+
+    /**
+     * Required: exact VkPhysicalDeviceFeatures2 chain that was enabled when
+     * creating `device`.
+     *
+     * Type: const VkPhysicalDeviceFeatures2* (or a pointer to a compatible
+     * pNext chain rooted in VkPhysicalDeviceFeatures2).
+     *
+     * This is needed because Vulkan provides no API to query the enabled
+     * feature set from an existing VkDevice, while libplacebo must know it
+     * when importing the device.
+     */
+    const void *enabled_features;
 
     /**
      * Optional: list of Vulkan device extensions the host enabled when
@@ -144,7 +161,16 @@ typedef struct mpv_vulkan_init_params {
  *
  * The host owns the VkImage. mpv will only read/write within the area
  * implied by `width`/`height` and will only ever transition the image to
- * the layouts described below.
+ * the layouts described below. The host must also describe the image's
+ * VkImageUsageFlags exactly, because libplacebo derives renderability and
+ * sampling capabilities from them.
+ *
+ * Ownership transfer is controlled explicitly with `in_qf` / `out_qf`.
+ * Use VK_QUEUE_FAMILY_EXTERNAL when handing the image over from or back to a
+ * non-Vulkan API (e.g. Metal). Use VK_QUEUE_FAMILY_IGNORED if no queue family
+ * ownership transfer is required, for example because the image was created
+ * with VK_SHARING_MODE_CONCURRENT or because producer/consumer already agree
+ * on the same queue family.
  *
  * Synchronization model
  * ---------------------
@@ -157,13 +183,11 @@ typedef struct mpv_vulkan_init_params {
  *      released the image. If `wait_semaphore` is 0, mpv assumes the image
  *      is immediately available.
  *
- *   2. When mpv finishes rendering, the same submission will signal
- *      `signal_semaphore` (if non-zero). The host MUST wait on this
- *      semaphore on whatever queue subsequently consumes the image. If
- *      `signal_semaphore` is 0, mpv may have already retired the work by
- *      the time mpv_render_context_render() returns, but no fence is
- *      provided; in that case the host is responsible for any further
- *      synchronization (e.g. vkQueueWaitIdle on the mpv queue).
+ *   2. When mpv finishes rendering, it will signal `signal_semaphore`.
+ *      The host MUST wait on this semaphore on whatever queue or API
+ *      subsequently consumes the image. This semaphore is required, because
+ *      libplacebo's external-image hold/release protocol needs an explicit
+ *      handoff point to return ownership to the host.
  *
  *   3. Both wait_value and signal_value are interpreted as timeline
  *      semaphore payloads. Set them to 0 for binary semaphores (default).
@@ -190,6 +214,19 @@ typedef struct mpv_vulkan_image {
     uint32_t format;
 
     /**
+     * Exact VkImageUsageFlags used when creating `image`.
+     * Type: VkImageUsageFlags (uint32_t per Vulkan spec).
+     */
+    uint32_t usage;
+
+    /**
+     * Which aspect of `image` to wrap. Leave as 0 for normal color images,
+     * which defaults to the full color aspect.
+     * Type: VkImageAspectFlags (uint32_t per Vulkan spec).
+     */
+    uint32_t aspect;
+
+    /**
      * Layout the host hands the image over to mpv in. mpv assumes the image
      * is currently in this layout when its first command sees it.
      * Typical value: VK_IMAGE_LAYOUT_UNDEFINED if the host does not care
@@ -200,6 +237,13 @@ typedef struct mpv_vulkan_image {
     uint32_t in_layout;
 
     /**
+     * Queue family that currently owns `image` when mpv starts using it.
+     * Type: uint32_t queue family index, VK_QUEUE_FAMILY_EXTERNAL, or
+     * VK_QUEUE_FAMILY_IGNORED.
+     */
+    uint32_t in_qf;
+
+    /**
      * Layout mpv must transition the image into before signalling
      * signal_semaphore / returning. The host should pick whatever layout
      * its consumer expects (e.g. VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
@@ -207,6 +251,14 @@ typedef struct mpv_vulkan_image {
      * presentation through a swapchain the host owns).
      */
     uint32_t out_layout;
+
+    /**
+     * Queue family ownership that mpv must release `image` to before
+     * signalling signal_semaphore / returning.
+     * Type: uint32_t queue family index, VK_QUEUE_FAMILY_EXTERNAL, or
+     * VK_QUEUE_FAMILY_IGNORED.
+     */
+    uint32_t out_qf;
 
     /**
      * VkSemaphore mpv must wait on before reading/writing `image`. May be 0.
@@ -221,8 +273,8 @@ typedef struct mpv_vulkan_image {
     uint64_t wait_value;
 
     /**
-     * VkSemaphore mpv must signal once rendering and the layout transition
-     * to out_layout are complete. May be 0 (no signal).
+    * VkSemaphore mpv must signal once rendering and the layout transition
+    * to out_layout are complete. This field is required and must be non-0.
      */
     uint64_t signal_semaphore;
 
