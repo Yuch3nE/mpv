@@ -192,6 +192,11 @@ typedef enum mpv_render_param_type {
     *   MPV_RENDER_API_TYPE_DXGI:
     *      Direct3D 11 via a DXGI swapchain.
     *      Providing MPV_RENDER_PARAM_DXGI_INIT_PARAMS is required.
+    *
+    *   MPV_RENDER_API_TYPE_VULKAN:
+    *      Vulkan, with the host providing the VkInstance/VkDevice.
+    *      Providing MPV_RENDER_PARAM_VULKAN_INIT_PARAMS is required, and
+    *      mpv_render_context_render() expects MPV_RENDER_PARAM_VK_IMAGE.
      */
     MPV_RENDER_PARAM_API_TYPE = 1,
     /**
@@ -454,6 +459,18 @@ typedef enum mpv_render_param_type {
      * to apply to its swapchain before rendering the next frame.
      */
     MPV_RENDER_PARAM_DXGI_COLORSPACE_HINT = 23,
+    /**
+     * Required parameters for initializing the Vulkan renderer. Valid for
+     * mpv_render_context_create().
+     * Type: mpv_vulkan_init_params*
+     */
+    MPV_RENDER_PARAM_VULKAN_INIT_PARAMS = 24,
+    /**
+     * Describes a Vulkan VkImage render target. Valid for
+     * mpv_render_context_render() when the Vulkan backend is in use.
+     * Type: mpv_vulkan_image*
+     */
+    MPV_RENDER_PARAM_VK_IMAGE = 25,
 } mpv_render_param_type;
 
 /**
@@ -502,6 +519,8 @@ typedef struct mpv_render_param {
 #define MPV_RENDER_API_TYPE_SW "sw"
 // See render_dxgi.h
 #define MPV_RENDER_API_TYPE_DXGI "dxgi"
+// See render_vk.h
+#define MPV_RENDER_API_TYPE_VULKAN "vulkan"
 
 /**
  * Flags used in mpv_render_frame_info.flags. Each value represents a bit in it.
