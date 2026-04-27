@@ -66,6 +66,10 @@ extern "C" {
  * VkSemaphores carried by mpv_vulkan_image, see below.
  */
 
+typedef void (*mpv_vulkan_queue_control_fn)(void *ctx,
+                                            uint32_t queue_family_index,
+                                            uint32_t queue_index);
+
 /**
  * For initializing the mpv Vulkan backend via
  * MPV_RENDER_PARAM_VULKAN_INIT_PARAMS.
@@ -134,6 +138,23 @@ typedef struct mpv_vulkan_init_params {
      * when importing the device.
      */
     const void *enabled_features;
+
+    /**
+     * Optional queue locking callbacks used when the host and mpv may submit
+     * work to the same VkDevice concurrently.
+     *
+     * If set, both callbacks must be provided. mpv/libplacebo will call them
+     * around queue submission work for the queue family/index it selected.
+     * This lets the host serialize its own queue access with mpv without
+     * forcing mpv to own the VkQueue directly.
+     *
+     * If omitted, the host must guarantee that it does not submit work
+     * concurrently to the queues mpv is using, or dedicate the family to mpv
+     * by creating the device with a single queue in that family.
+     */
+    mpv_vulkan_queue_control_fn lock_queue;
+    mpv_vulkan_queue_control_fn unlock_queue;
+    void *queue_ctx;
 
     /**
      * Optional: list of Vulkan device extensions the host enabled when

@@ -115,6 +115,7 @@ static int init(struct libmpv_gpu_next_context *ctx, mpv_render_param *params)
     if (!init_params || !init_params->instance || !init_params->phys_device ||
         !init_params->device || !init_params->get_proc_addr ||
         !init_params->enabled_features || !init_params->queue_count ||
+        (!!init_params->lock_queue != !!init_params->unlock_queue) ||
         init_params->num_enabled_device_extensions > INT_MAX)
     {
         return MPV_ERROR_INVALID_PARAMETER;
@@ -148,6 +149,9 @@ static int init(struct libmpv_gpu_next_context *ctx, mpv_render_param *params)
             .count = init_params->queue_count,
         },
         .features = (const VkPhysicalDeviceFeatures2 *)init_params->enabled_features,
+        .lock_queue = init_params->lock_queue,
+        .unlock_queue = init_params->unlock_queue,
+        .queue_ctx = init_params->queue_ctx,
     ));
     if (!p->vulkan)
         return MPV_ERROR_UNSUPPORTED;
