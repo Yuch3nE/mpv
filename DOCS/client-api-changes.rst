@@ -32,6 +32,11 @@ API changes
 
 ::
 
+ 2.7    - add MPV_RENDER_API_TYPE_VULKAN render backend along with the new
+          render_vk.h header (mpv_vulkan_init_params, mpv_vulkan_image,
+          mpv_vulkan_colorspace_hint) and the associated MPV_RENDER_PARAM
+          values (VULKAN_INIT_PARAMS, VK_IMAGE, VK_COLORSPACE_HINT,
+          VK_TARGET_STATE).
  --- mpv 0.40.0 ---
  2.6    - add MPV_RENDER_PARAM_BACKEND. Selects the libmpv internal render
           backend implementation. Recognised values are "gpu" (default,
