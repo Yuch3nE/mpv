@@ -139,6 +139,10 @@ typedef struct mpv_vulkan_init_params {
      * Index of the queue family on phys_device that mpv/libplacebo is allowed
      * to submit graphics + compute work to. The queue family must support
      * both VK_QUEUE_GRAPHICS_BIT and VK_QUEUE_COMPUTE_BIT.
+     *
+     * Currently mpv uses this single queue family for all internal work
+     * (graphics, compute, transfer). Splitting work across dedicated transfer
+     * or async-compute queues is not supported in this initial version.
      */
     uint32_t queue_family_index;
 
@@ -206,8 +210,12 @@ typedef struct mpv_vulkan_init_params {
     size_t num_enabled_device_extensions;
 
     /**
-     * Optional: list of Vulkan instance extensions the host enabled when
-     * creating `instance`. Same lifetime rules as above.
+     * Optional / reserved: list of Vulkan instance extensions the host
+     * enabled when creating `instance`. Same lifetime rules as above.
+     *
+     * Note: this field is currently informational only and not consumed by
+     * the underlying renderer. It is kept in the API so future versions can
+     * forward it without breaking ABI. May be left NULL/0.
      */
     const char *const *enabled_instance_extensions;
     size_t num_enabled_instance_extensions;

@@ -176,6 +176,20 @@ int libmpv_vulkan_shared_set_target_state(struct libmpv_vulkan_shared *shared,
                                           const mpv_vulkan_image *target,
                                           int depth_fallback)
 {
+    // Reject obviously invalid HDR luminance values (negative or NaN). Zero
+    // means "unset" and is allowed.
+    float lumas[] = {
+        target->surface_min_luma, target->surface_max_luma,
+        target->surface_max_cll, target->surface_max_fall,
+    };
+    for (size_t i = 0; i < MP_ARRAY_SIZE(lumas); i++) {
+        if (lumas[i] < 0 || lumas[i] != lumas[i]) {
+            mp_err(log, "Invalid Vulkan surface luminance value: %f\n",
+                   lumas[i]);
+            return MPV_ERROR_INVALID_PARAMETER;
+        }
+    }
+
     struct pl_color_space surface_color;
     int err = parse_surface_color(log, target, &surface_color);
     if (err < 0)
