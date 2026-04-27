@@ -484,6 +484,19 @@ typedef enum mpv_render_param_type {
      * available until at least one frame has been rendered.
      */
     MPV_RENDER_PARAM_VK_COLORSPACE_HINT = 26,
+    /**
+     * Update the cached Vulkan target state used for colorspace hinting.
+     * Valid for mpv_render_context_set_parameter().
+     * Type: mpv_vulkan_image*
+     *
+     * This lets the host publish the current target's colorspace/depth
+     * metadata before the next mpv_render_context_render() call, so
+     * MPV_RENDER_PARAM_VK_COLORSPACE_HINT can reflect the current target more
+     * closely instead of depending solely on the most recently rendered one.
+     * Only the target description fields are consulted; synchronization and
+     * image handle fields may be left zero.
+     */
+    MPV_RENDER_PARAM_VK_TARGET_STATE = 27,
 } mpv_render_param_type;
 
 /**

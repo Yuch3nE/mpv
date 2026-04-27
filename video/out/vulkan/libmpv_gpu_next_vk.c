@@ -7,18 +7,12 @@
 #include "common/common.h"
 #include "common/msg.h"
 #include "mpv/render_vk.h"
-#include "options/m_option.h"
-#include "video/csputils.h"
-#include "video/out/gpu/context.h"
 #include "video/out/gpu_next/libmpv_gpu_next.h"
 #include "video/out/gpu_next/video.h"
-#include "video/out/placebo/ra_pl.h"
-#include "video/out/placebo/utils.h"
-#include "video/out/vulkan/common.h"
+#include "video/out/vulkan/libmpv_vulkan_shared.h"
 
 struct priv {
-    pl_vulkan vulkan;
-    struct ra_ctx *ra_ctx;
+    struct libmpv_vulkan_shared shared;
     pl_tex wrapped_target;
 
     uint64_t wrapped_image;
@@ -29,8 +23,6 @@ struct priv {
     uint32_t wrapped_aspect;
 
     mpv_vulkan_image current_target;
-    struct pl_color_space surface_color;
-    int surface_color_depth;
 };
 
 #if defined(VK_USE_64_BIT_PTR_DEFINES) && VK_USE_64_BIT_PTR_DEFINES
@@ -122,107 +114,46 @@ static bool same_wrapped_target(struct priv *p, const mpv_vulkan_image *target)
            p->wrapped_aspect == target->aspect;
 }
 
-static int vk_format_depth(VkFormat format)
-{
-    switch (format) {
-    case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
-    case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
-        return 10;
-    case VK_FORMAT_R16G16B16A16_SFLOAT:
-    case VK_FORMAT_R16G16B16A16_UNORM:
-    case VK_FORMAT_R16G16B16A16_SNORM:
-    case VK_FORMAT_R16G16B16A16_UINT:
-    case VK_FORMAT_R16G16B16A16_SINT:
-        return 16;
-    case VK_FORMAT_R8G8B8A8_UNORM:
-    case VK_FORMAT_R8G8B8A8_SRGB:
-    case VK_FORMAT_B8G8R8A8_UNORM:
-    case VK_FORMAT_B8G8R8A8_SRGB:
-        return 8;
-    default:
-        return 0;
-    }
-}
-
 static int get_target_size(struct libmpv_gpu_next_context *ctx,
                            mpv_render_param *params,
                            int *out_w,
                            int *out_h)
 {
-    mpv_vulkan_image *target =
-        get_mpv_render_param(params, MPV_RENDER_PARAM_VK_IMAGE, NULL);
-    if (!target || !target->image || !target->width || !target->height)
-        return MPV_ERROR_INVALID_PARAMETER;
-    if (target->width > INT_MAX || target->height > INT_MAX)
-        return MPV_ERROR_INVALID_PARAMETER;
-
-    *out_w = (int)target->width;
-    *out_h = (int)target->height;
-    return 0;
+    return libmpv_vulkan_shared_get_target_size(
+        get_mpv_render_param(params, MPV_RENDER_PARAM_VK_IMAGE, NULL),
+        out_w, out_h);
 }
 
 static int init(struct libmpv_gpu_next_context *ctx, mpv_render_param *params)
 {
-    mpv_vulkan_init_params *init_params =
-        get_mpv_render_param(params, MPV_RENDER_PARAM_VULKAN_INIT_PARAMS, NULL);
-    if (!init_params || !init_params->instance || !init_params->phys_device ||
-        !init_params->device || !init_params->get_proc_addr ||
-        !init_params->enabled_features || !init_params->queue_count ||
-        (!!init_params->lock_queue != !!init_params->unlock_queue) ||
-        init_params->num_enabled_device_extensions > INT_MAX)
-    {
-        return MPV_ERROR_INVALID_PARAMETER;
-    }
-
     ctx->priv = talloc_zero(NULL, struct priv);
     struct priv *p = ctx->priv;
 
-    ctx->pllog = mppl_log_create(ctx, ctx->log);
-    if (!ctx->pllog)
-        return MPV_ERROR_UNSUPPORTED;
-    mppl_log_set_probing(ctx->pllog, false);
+    int err = libmpv_vulkan_shared_init(&p->shared, p, ctx->log,
+                                        ctx->global, params);
+    if (err < 0)
+        return err;
 
-    p->vulkan = pl_vulkan_import(ctx->pllog, pl_vulkan_import_params(
-        .instance = (VkInstance)init_params->instance,
-        .get_proc_addr = (PFN_vkGetInstanceProcAddr)init_params->get_proc_addr,
-        .phys_device = (VkPhysicalDevice)init_params->phys_device,
-        .device = (VkDevice)init_params->device,
-        .extensions = init_params->enabled_device_extensions,
-        .num_extensions = (int)init_params->num_enabled_device_extensions,
-        .queue_graphics = {
-            .index = init_params->queue_family_index,
-            .count = init_params->queue_count,
-        },
-        .queue_compute = {
-            .index = init_params->queue_family_index,
-            .count = init_params->queue_count,
-        },
-        .queue_transfer = {
-            .index = init_params->queue_family_index,
-            .count = init_params->queue_count,
-        },
-        .features = (const VkPhysicalDeviceFeatures2 *)init_params->enabled_features,
-        .lock_queue = init_params->lock_queue,
-        .unlock_queue = init_params->unlock_queue,
-        .queue_ctx = init_params->queue_ctx,
-    ));
-    if (!p->vulkan)
-        return MPV_ERROR_UNSUPPORTED;
-
-    p->ra_ctx = talloc_zero(p, struct ra_ctx);
-    p->ra_ctx->global = ctx->global;
-    p->ra_ctx->log = ctx->log;
-    p->ra_ctx->opts = (struct ra_ctx_opts) {
-        .allow_sw = true,
-    };
-    p->ra_ctx->ra = ra_create_pl(p->vulkan->gpu, ctx->log);
-    if (!p->ra_ctx->ra)
-        return MPV_ERROR_UNSUPPORTED;
-    talloc_steal(p->ra_ctx, p->ra_ctx->ra);
-
-    ctx->ra_ctx = p->ra_ctx;
-    ctx->gpu = p->vulkan->gpu;
+    ctx->ra_ctx = p->shared.ra_ctx;
+    ctx->pllog = p->shared.pllog;
+    ctx->gpu = p->shared.vulkan->gpu;
     return 0;
+}
+
+static int set_parameter(struct libmpv_gpu_next_context *ctx,
+                         mpv_render_param param)
+{
+    struct priv *p = ctx->priv;
+
+    if (param.type == MPV_RENDER_PARAM_VK_TARGET_STATE) {
+        mpv_vulkan_image *target = param.data;
+        if (!target)
+            return MPV_ERROR_INVALID_PARAMETER;
+        return libmpv_vulkan_shared_set_target_state(&p->shared, ctx->log,
+                                                     target, 0);
+    }
+
+    return MPV_ERROR_NOT_IMPLEMENTED;
 }
 
 static int query_target(struct libmpv_gpu_next_context *ctx,
@@ -230,8 +161,8 @@ static int query_target(struct libmpv_gpu_next_context *ctx,
 {
     struct priv *p = ctx->priv;
     *out = (struct gpu_next_render_target) {
-        .surface_color = p->surface_color,
-        .color_depth = p->surface_color_depth,
+        .surface_color = p->shared.surface_color,
+        .color_depth = p->shared.surface_color_depth,
         .flip_y = false,
     };
     return 0;
@@ -252,8 +183,9 @@ static int wrap_target(struct libmpv_gpu_next_context *ctx,
         return MPV_ERROR_INVALID_PARAMETER;
     }
 
-    struct pl_color_space surface_color;
-    int err = parse_surface_color(ctx, target, &surface_color);
+    int err = libmpv_vulkan_shared_set_target_state(
+        &p->shared, ctx->log, target,
+        GET_MPV_RENDER_PARAM(params, MPV_RENDER_PARAM_DEPTH, int, 0));
     if (err < 0)
         return err;
 
@@ -299,15 +231,9 @@ static int wrap_target(struct libmpv_gpu_next_context *ctx,
     if (p->wrapped_target->params.format)
         components = p->wrapped_target->params.format->num_components;
 
-    int color_depth = vk_format_depth((VkFormat)target->format);
-    if (!color_depth)
-        color_depth = GET_MPV_RENDER_PARAM(params, MPV_RENDER_PARAM_DEPTH,
-                                           int, 0);
+    int color_depth = p->shared.surface_color_depth;
 
-    p->surface_color = surface_color;
-    p->surface_color_depth = color_depth;
-
-    struct pl_color_space frame_color = surface_color;
+    struct pl_color_space frame_color = p->shared.surface_color;
     if (frame_color.transfer == PL_COLOR_TRC_UNKNOWN &&
         frame_color.primaries == PL_COLOR_PRIM_UNKNOWN)
     {
@@ -327,7 +253,7 @@ static int wrap_target(struct libmpv_gpu_next_context *ctx,
                 },
             },
         },
-        .surface_color = surface_color,
+        .surface_color = p->shared.surface_color,
         .color_depth = color_depth,
         .flip_y = false,
     };
@@ -360,20 +286,20 @@ static void destroy(struct libmpv_gpu_next_context *ctx)
     struct priv *p = ctx->priv;
 
     destroy_wrapped_target(ctx);
-    if (p && p->vulkan)
-        pl_vulkan_destroy(&p->vulkan);
-    if (ctx->pllog)
-        pl_log_destroy(&ctx->pllog);
+    if (p)
+        libmpv_vulkan_shared_uninit(&p->shared);
 
     talloc_free(p);
     ctx->priv = NULL;
     ctx->ra_ctx = NULL;
+    ctx->pllog = NULL;
     ctx->gpu = NULL;
 }
 
 const struct libmpv_gpu_next_context_fns libmpv_gpu_next_context_vk = {
     .api_name = MPV_RENDER_API_TYPE_VULKAN,
     .init = init,
+    .set_parameter = set_parameter,
     .query_target = query_target,
     .get_target_size = get_target_size,
     .wrap_target = wrap_target,

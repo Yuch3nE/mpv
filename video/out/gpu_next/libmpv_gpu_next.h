@@ -39,6 +39,8 @@ struct libmpv_gpu_next_context {
 struct libmpv_gpu_next_context_fns {
     const char *api_name;
     int (*init)(struct libmpv_gpu_next_context *ctx, mpv_render_param *params);
+    int (*set_parameter)(struct libmpv_gpu_next_context *ctx,
+                         mpv_render_param param);
     int (*query_target)(struct libmpv_gpu_next_context *ctx,
                         struct gpu_next_render_target *out);
     int (*get_target_size)(struct libmpv_gpu_next_context *ctx,

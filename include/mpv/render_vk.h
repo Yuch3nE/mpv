@@ -217,6 +217,11 @@ typedef struct mpv_vulkan_init_params {
  * Describes a VkImage render target for mpv_render_context_render().
  * Pass via MPV_RENDER_PARAM_VK_IMAGE.
  *
+ * This same struct is also accepted by MPV_RENDER_PARAM_VK_TARGET_STATE.
+ * In that case only the target description fields such as `format`, `usage`,
+ * `surface_primaries`, `surface_transfer`, and the surface luminance metadata
+ * are consulted; image handle and synchronization fields may be left zero.
+ *
  * The host owns the VkImage. mpv will only read/write within the area
  * implied by `width`/`height` and will only ever transition the image to
  * the layouts described below. The host must also describe the image's

@@ -187,6 +187,12 @@ static int set_parameter(struct render_backend *ctx, mpv_render_param param)
 {
     struct backend_priv *p = ctx->priv;
 
+    if (p->context->fns->set_parameter) {
+        int err = p->context->fns->set_parameter(p->context, param);
+        if (err != MPV_ERROR_NOT_IMPLEMENTED)
+            return err;
+    }
+
     switch (param.type) {
     case MPV_RENDER_PARAM_ICC_PROFILE: {
         mpv_byte_array *data = param.data;
