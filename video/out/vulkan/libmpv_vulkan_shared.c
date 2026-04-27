@@ -5,6 +5,7 @@
 #include "options/m_option.h"
 #include "video/csputils.h"
 #include "video/out/gpu/context.h"
+#include "video/out/libmpv.h"
 #include "video/out/placebo/ra_pl.h"
 #include "video/out/placebo/utils.h"
 #include "video/out/vulkan/common.h"

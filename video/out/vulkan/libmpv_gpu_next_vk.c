@@ -5,6 +5,7 @@
 #include "mpv/render_vk.h"
 #include "video/out/gpu_next/libmpv_gpu_next.h"
 #include "video/out/gpu_next/video.h"
+#include "video/out/libmpv.h"
 #include "video/out/vulkan/libmpv_vulkan_shared.h"
 
 struct priv {
