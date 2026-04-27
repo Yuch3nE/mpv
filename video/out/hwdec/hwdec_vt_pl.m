@@ -48,9 +48,9 @@ static bool check_hwdec(const struct ra_hwdec *hw)
         return false;
     }
 
-    if (!(gpu->import_caps.tex & PL_HANDLE_IOSURFACE)) {
+    if (!(gpu->import_caps.tex & PL_HANDLE_MTL_TEX)) {
         MP_VERBOSE(hw, "VideoToolbox libplacebo interop requires support for "
-                       "PL_HANDLE_IOSURFACE import.\n");
+                       "PL_HANDLE_MTL_TEX import.\n");
         return false;
     }
 
@@ -82,60 +82,133 @@ static int mapper_init(struct ra_hwdec_mapper *mapper)
         }
     }
 
-    // The IOSurface import path does not need an MTLDevice or
-    // CVMetalTextureCache. Leave p->mtl_texture_cache as NULL.
+    id<MTLDevice> mtl_device = nil;
+
+#ifdef VK_EXT_METAL_OBJECTS_SPEC_VERSION
+    pl_gpu gpu = ra_pl_get(mapper->ra);
+    if (gpu) {
+        pl_vulkan vulkan = pl_vulkan_get(gpu);
+        if (vulkan && vulkan->device && vulkan->instance && vulkan->get_proc_addr) {
+            PFN_vkExportMetalObjectsEXT pExportMetalObjects = (PFN_vkExportMetalObjectsEXT)vulkan->get_proc_addr(vulkan->instance, "vkExportMetalObjectsEXT");
+            if (pExportMetalObjects) {
+                VkExportMetalDeviceInfoEXT device_info = {
+                    .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_DEVICE_INFO_EXT,
+                    .pNext = NULL,
+                    .mtlDevice = nil,
+                };
+
+                VkExportMetalObjectsInfoEXT objects_info = {
+                    .sType = VK_STRUCTURE_TYPE_EXPORT_METAL_OBJECTS_INFO_EXT,
+                    .pNext = &device_info,
+                };
+
+                pExportMetalObjects(vulkan->device, &objects_info);
+
+                mtl_device = device_info.mtlDevice;
+                [mtl_device retain];
+            }
+        }
+    }
+#endif
+
+    if (!mtl_device) {
+        mtl_device = MTLCreateSystemDefaultDevice();
+    }
+
+    CVReturn err = CVMetalTextureCacheCreate(
+        kCFAllocatorDefault,
+        NULL,
+        mtl_device,
+        NULL,
+        &p->mtl_texture_cache);
+
+    [mtl_device release];
+
+    if (err != noErr) {
+        MP_ERR(mapper, "Failure in CVOpenGLESTextureCacheCreate: %d\n", err);
+        return -1;
+    }
+
     return 0;
 }
 
 static void mapper_unmap(struct ra_hwdec_mapper *mapper)
 {
     struct priv *p = mapper->priv;
-    pl_gpu gpu = ra_pl_get(mapper->owner->ra_ctx->ra);
 
-    // The per-plane ratex entries reference sub-planes of p->iosurf_pltex.
-    // Clear their priv to prevent ra_tex_free -> pl_tex_destroy from running
-    // on a sub-plane (which is undefined behavior per libplacebo's API).
     for (int i = 0; i < p->desc.num_planes; i++) {
-        if (mapper->tex[i])
-            mapper->tex[i]->priv = NULL;
         ra_tex_free(mapper->ra, &mapper->tex[i]);
+        if (p->mtl_planes[i]) {
+            CFRelease(p->mtl_planes[i]);
+            p->mtl_planes[i] = NULL;
+        }
     }
 
-    if (p->iosurf_pltex) {
-        pl_tex parent = (pl_tex) p->iosurf_pltex;
-        pl_tex_destroy(gpu, &parent);
-        p->iosurf_pltex = NULL;
-    }
+    CVMetalTextureCacheFlush(p->mtl_texture_cache, 0);
 }
 
-// Map kCVPixelFormatType_* to a libplacebo planar pl_fmt name. Only the
-// formats the VideoToolbox decoder actually emits are listed here.
 static const struct {
-    OSType cv_fmt;
-    const char *pl_fmt_name;
-} cv_to_pl_fmt[] = {
-    // 4:2:0 8-bit bi-planar (NV12)
-    {kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange,  "g8_br8_420"},
-    {kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,   "g8_br8_420"},
-    // 4:2:0 10-bit bi-planar (P010)
-    {kCVPixelFormatType_420YpCbCr10BiPlanarVideoRange, "gx10_bxrx10_420"},
-    {kCVPixelFormatType_420YpCbCr10BiPlanarFullRange,  "gx10_bxrx10_420"},
-    // 4:2:2 10-bit bi-planar
-    {kCVPixelFormatType_422YpCbCr10BiPlanarVideoRange, "gx10_bxrx10_422"},
-    {kCVPixelFormatType_422YpCbCr10BiPlanarFullRange,  "gx10_bxrx10_422"},
-    // 4:4:4 10-bit bi-planar
-    {kCVPixelFormatType_444YpCbCr10BiPlanarVideoRange, "gx10_bxrx10_444"},
-    {kCVPixelFormatType_444YpCbCr10BiPlanarFullRange,  "gx10_bxrx10_444"},
-    {0, NULL},
+    const char *glsl;
+    MTLPixelFormat mtl;
+} mtl_fmts[] = {
+    {"r16f",           MTLPixelFormatR16Float     },
+    {"r32f",           MTLPixelFormatR32Float     },
+    {"rg16f",          MTLPixelFormatRG16Float    },
+    {"rg32f",          MTLPixelFormatRG32Float    },
+    {"rgba16f",        MTLPixelFormatRGBA16Float  },
+    {"rgba32f",        MTLPixelFormatRGBA32Float  },
+    {"r11f_g11f_b10f", MTLPixelFormatRG11B10Float },
+
+    {"r8",             MTLPixelFormatR8Unorm      },
+    {"r16",            MTLPixelFormatR16Unorm     },
+    {"rg8",            MTLPixelFormatRG8Unorm     },
+    {"rg16",           MTLPixelFormatRG16Unorm    },
+    {"rgba8",          MTLPixelFormatRGBA8Unorm   },
+    {"rgba16",         MTLPixelFormatRGBA16Unorm  },
+    {"rgb10_a2",       MTLPixelFormatRGB10A2Unorm },
+
+    {"r8_snorm",       MTLPixelFormatR8Snorm      },
+    {"r16_snorm",      MTLPixelFormatR16Snorm     },
+    {"rg8_snorm",      MTLPixelFormatRG8Snorm     },
+    {"rg16_snorm",     MTLPixelFormatRG16Snorm    },
+    {"rgba8_snorm",    MTLPixelFormatRGBA8Snorm   },
+    {"rgba16_snorm",   MTLPixelFormatRGBA16Snorm  },
+
+    {"r8ui",           MTLPixelFormatR8Uint       },
+    {"r16ui",          MTLPixelFormatR16Uint      },
+    {"r32ui",          MTLPixelFormatR32Uint      },
+    {"rg8ui",          MTLPixelFormatRG8Uint      },
+    {"rg16ui",         MTLPixelFormatRG16Uint     },
+    {"rg32ui",         MTLPixelFormatRG32Uint     },
+    {"rgba8ui",        MTLPixelFormatRGBA8Uint    },
+    {"rgba16ui",       MTLPixelFormatRGBA16Uint   },
+    {"rgba32ui",       MTLPixelFormatRGBA32Uint   },
+    {"rgb10_a2ui",     MTLPixelFormatRGB10A2Uint  },
+
+    {"r8i",            MTLPixelFormatR8Sint       },
+    {"r16i",           MTLPixelFormatR16Sint      },
+    {"r32i",           MTLPixelFormatR32Sint      },
+    {"rg8i",           MTLPixelFormatRG8Sint      },
+    {"rg16i",          MTLPixelFormatRG16Sint     },
+    {"rg32i",          MTLPixelFormatRG32Sint     },
+    {"rgba8i",         MTLPixelFormatRGBA8Sint    },
+    {"rgba16i",        MTLPixelFormatRGBA16Sint   },
+    {"rgba32i",        MTLPixelFormatRGBA32Sint   },
+
+    { NULL,            MTLPixelFormatInvalid },
 };
 
-static const char *cv_fmt_to_pl_name(OSType cv_fmt)
+static MTLPixelFormat get_mtl_fmt(const char* glsl)
 {
-    for (int i = 0; cv_to_pl_fmt[i].pl_fmt_name; i++) {
-        if (cv_to_pl_fmt[i].cv_fmt == cv_fmt)
-            return cv_to_pl_fmt[i].pl_fmt_name;
+    if (!glsl)
+        return MTLPixelFormatInvalid;
+
+    for (int i = 0; mtl_fmts[i].glsl; i++) {
+        if (!strcmp(glsl, mtl_fmts[i].glsl))
+            return mtl_fmts[i].mtl;
     }
-    return NULL;
+
+    return MTLPixelFormatInvalid;
 }
 
 static int mapper_map(struct ra_hwdec_mapper *mapper)
@@ -151,65 +224,58 @@ static int mapper_map(struct ra_hwdec_mapper *mapper)
     const int planes  = CVPixelBufferGetPlaneCount(p->pbuf);
     mp_assert((planar && planes == p->desc.num_planes) || p->desc.num_planes == 1);
 
-    IOSurfaceRef iosurf = CVPixelBufferGetIOSurface(p->pbuf);
-    if (!iosurf) {
-        MP_ERR(mapper, "CVPixelBuffer is not IOSurface backed.\n");
-        return -1;
-    }
+    for (int i = 0; i < p->desc.num_planes; i++) {
+        const struct ra_format *fmt = p->desc.planes[i];
 
-    OSType cv_fmt = CVPixelBufferGetPixelFormatType(p->pbuf);
-    const char *pl_fmt_name = cv_fmt_to_pl_name(cv_fmt);
-    if (!pl_fmt_name) {
-        MP_ERR(mapper, "Unsupported CVPixelFormat 0x%08x for IOSurface "
-                       "import.\n", (unsigned) cv_fmt);
-        return -1;
-    }
+        pl_fmt plfmt = ra_pl_fmt_get(fmt);
+        MTLPixelFormat format = get_mtl_fmt(plfmt->glsl_format);
 
-    pl_fmt plfmt = pl_find_named_fmt(gpu, pl_fmt_name);
-    if (!plfmt) {
-        MP_ERR(mapper, "libplacebo lacks pl_fmt '%s'.\n", pl_fmt_name);
-        return -1;
-    }
-
-    const size_t width  = CVPixelBufferGetWidth(p->pbuf);
-    const size_t height = CVPixelBufferGetHeight(p->pbuf);
-
-    struct pl_tex_params tex_params = {
-        .w = width,
-        .h = height,
-        .d = 0,
-        .format = plfmt,
-        .sampleable = true,
-        .import_handle = PL_HANDLE_IOSURFACE,
-        .shared_mem = (struct pl_shared_mem) {
-            .handle = { .handle = iosurf },
-        },
-    };
-
-    pl_tex pltex = pl_tex_create(gpu, &tex_params);
-    if (!pltex) {
-        MP_ERR(mapper, "pl_tex_create with PL_HANDLE_IOSURFACE failed.\n");
-        return -1;
-    }
-
-    p->iosurf_pltex = (void *) pltex;
-
-    const int num_planes = plfmt->num_planes ? plfmt->num_planes : 1;
-    if (num_planes != p->desc.num_planes) {
-        MP_ERR(mapper, "pl_fmt '%s' plane count %d does not match imgfmt "
-                       "plane count %d.\n",
-               pl_fmt_name, num_planes, p->desc.num_planes);
-        return -1;
-    }
-
-    for (int i = 0; i < num_planes; i++) {
-        pl_tex sub = plfmt->num_planes ? pltex->planes[i] : pltex;
-        if (!sub) {
-            MP_ERR(mapper, "pl_tex sub-plane %d missing.\n", i);
+        if (!format) {
+            MP_ERR(mapper, "Format unsupported.\n");
             return -1;
         }
+
+        size_t width  = CVPixelBufferGetWidthOfPlane(p->pbuf, i),
+               height = CVPixelBufferGetHeightOfPlane(p->pbuf, i);
+
+        CVReturn err = CVMetalTextureCacheCreateTextureFromImage(
+            kCFAllocatorDefault,
+            p->mtl_texture_cache,
+            p->pbuf,
+            NULL,
+            format,
+            width,
+            height,
+            i,
+            &p->mtl_planes[i]);
+
+        if (err != noErr) {
+            MP_ERR(mapper, "error creating texture for plane %d: %d\n", i, err);
+            return -1;
+        }
+
+        struct pl_tex_params tex_params = {
+            .w = width,
+            .h = height,
+            .d = 0,
+            .format = plfmt,
+            .sampleable = true,
+            .import_handle = PL_HANDLE_MTL_TEX,
+            .shared_mem = (struct pl_shared_mem) {
+                .handle = {
+                    .handle = CVMetalTextureGetTexture(p->mtl_planes[i]),
+                },
+            },
+        };
+
+        pl_tex pltex = pl_tex_create(gpu, &tex_params);
+        if (!pltex)
+            return -1;
+
         struct ra_tex *ratex = talloc_ptrtype(NULL, ratex);
-        if (!mppl_wrap_tex(mapper->ra, sub, ratex)) {
+        int ret = mppl_wrap_tex(mapper->ra, pltex, ratex);
+        if (!ret) {
+            pl_tex_destroy(gpu, &pltex);
             talloc_free(ratex);
             return -1;
         }
@@ -224,6 +290,10 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper)
     struct priv *p = mapper->priv;
 
     CVPixelBufferRelease(p->pbuf);
+    if (p->mtl_texture_cache) {
+        CFRelease(p->mtl_texture_cache);
+        p->mtl_texture_cache = NULL;
+    }
 }
 
 bool vt_pl_init(const struct ra_hwdec *hw)

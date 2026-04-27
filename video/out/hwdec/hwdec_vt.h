@@ -52,11 +52,6 @@ struct priv {
 #if HAVE_VIDEOTOOLBOX_PL
     CVMetalTextureCacheRef mtl_texture_cache;
     CVMetalTextureRef mtl_planes[MP_MAX_PLANES];
-    // Parent pl_tex when importing the whole IOSurface as a single multi-plane
-    // VkImage (preferred path on Vulkan to avoid libplacebo's
-    // VK_IMAGE_ASPECT_PLANE_0_BIT bug for non-multiplanar MTLTexture imports).
-    // Stored as opaque pointer to keep this header free of libplacebo headers.
-    void *iosurf_pltex;
 #endif
 
     struct ra_imgfmt_desc desc;
