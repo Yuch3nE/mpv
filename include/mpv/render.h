@@ -472,6 +472,18 @@ typedef enum mpv_render_param_type {
      * Type: mpv_vulkan_image*
      */
     MPV_RENDER_PARAM_VK_IMAGE = 25,
+    /**
+     * Return the gpu-next colorspace hint for the most recently rendered
+     * Vulkan target.
+     * Valid for mpv_render_context_get_info().
+     * Type: mpv_vulkan_colorspace_hint*
+     *
+     * This is intended for MPV_RENDER_API_TYPE_VULKAN with the "gpu-next"
+     * backend. Because Vulkan targets are provided per render call, this hint
+     * is derived from the most recently rendered VkImage target and is not
+     * available until at least one frame has been rendered.
+     */
+    MPV_RENDER_PARAM_VK_COLORSPACE_HINT = 26,
 } mpv_render_param_type;
 
 /**

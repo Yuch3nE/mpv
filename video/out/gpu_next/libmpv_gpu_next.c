@@ -24,7 +24,11 @@
 #include "mpv/render_dxgi.h"
 #include "video/out/gpu/d3d11_helpers.h"
 #endif
+#if HAVE_VULKAN
+#include "mpv/render_vk.h"
+#endif
 #include "mpv/render_gl.h"
+#include "video/csputils.h"
 #include "video/out/gpu/hwdec.h"
 #include "video/out/gpu/ra.h"
 #include "video/out/gpu_next/libmpv_gpu_next.h"
@@ -258,6 +262,52 @@ static int get_info(struct render_backend *ctx, mpv_render_param param,
             hint->max_fall = params.color.hdr.max_fall;
         } else if (!res.enabled) {
             hint->state = MPV_DXGI_COLORSPACE_HINT_CLEAR;
+        }
+
+        return 0;
+    }
+#endif
+
+#if HAVE_VULKAN
+    if (param.type == MPV_RENDER_PARAM_VK_COLORSPACE_HINT &&
+        p->context->fns->query_target)
+    {
+        mpv_vulkan_colorspace_hint *hint = param.data;
+        *hint = (mpv_vulkan_colorspace_hint){0};
+
+        struct gpu_next_render_target target;
+        int err = p->context->fns->query_target(p->context, &target);
+        if (err < 0)
+            return err;
+
+        if (!target.color_depth &&
+            target.surface_color.transfer == PL_COLOR_TRC_UNKNOWN &&
+            target.surface_color.primaries == PL_COLOR_PRIM_UNKNOWN)
+        {
+            hint->state = MPV_VULKAN_COLORSPACE_HINT_NONE;
+            return 0;
+        }
+
+        struct gpu_next_colorspace_hint res =
+            gpu_next_get_colorspace_hint(p->renderer, frame, &target);
+        if (res.valid) {
+            struct mp_image_params params = {
+                .color = res.color,
+                .repr = pl_color_repr_rgb,
+            };
+            pl_color_space_infer(&params.color);
+            hint->state = MPV_VULKAN_COLORSPACE_HINT_SET;
+            hint->primaries = m_opt_choice_str(pl_csp_prim_names,
+                                               params.color.primaries);
+            hint->transfer = m_opt_choice_str(pl_csp_trc_names,
+                                              params.color.transfer);
+            hint->bits_per_color = target.color_depth;
+            hint->min_luma = params.color.hdr.min_luma;
+            hint->max_luma = params.color.hdr.max_luma;
+            hint->max_cll = params.color.hdr.max_cll;
+            hint->max_fall = params.color.hdr.max_fall;
+        } else if (!res.enabled) {
+            hint->state = MPV_VULKAN_COLORSPACE_HINT_CLEAR;
         }
 
         return 0;

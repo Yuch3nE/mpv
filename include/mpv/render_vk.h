@@ -70,6 +70,43 @@ typedef void (*mpv_vulkan_queue_control_fn)(void *ctx,
                                             uint32_t queue_family_index,
                                             uint32_t queue_index);
 
+typedef enum mpv_vulkan_colorspace_hint_state {
+    /**
+     * No hint is available yet, usually because no Vulkan target has been
+     * rendered through this context.
+     */
+    MPV_VULKAN_COLORSPACE_HINT_NONE = 0,
+    /**
+     * Apply the returned primaries/transfer/HDR metadata to the host side
+     * pipeline consuming the rendered VkImage.
+     */
+    MPV_VULKAN_COLORSPACE_HINT_SET = 1,
+    /**
+     * Clear any previously applied output colorspace/HDR override.
+     */
+    MPV_VULKAN_COLORSPACE_HINT_CLEAR = 2,
+} mpv_vulkan_colorspace_hint_state;
+
+/**
+ * Returned by MPV_RENDER_PARAM_VK_COLORSPACE_HINT.
+ *
+ * `primaries` and `transfer` use the same names as mpv's color option
+ * strings, for example:
+ *
+ *   primaries: "bt.709", "display-p3", "bt.2020"
+ *   transfer:  "srgb", "linear", "pq", "hlg", "bt.1886"
+ */
+typedef struct mpv_vulkan_colorspace_hint {
+    enum mpv_vulkan_colorspace_hint_state state;
+    const char *primaries;
+    const char *transfer;
+    uint32_t bits_per_color;
+    float min_luma;
+    float max_luma;
+    float max_cll;
+    float max_fall;
+} mpv_vulkan_colorspace_hint;
+
 /**
  * For initializing the mpv Vulkan backend via
  * MPV_RENDER_PARAM_VULKAN_INIT_PARAMS.
@@ -246,6 +283,26 @@ typedef struct mpv_vulkan_image {
      * Type: VkImageAspectFlags (uint32_t per Vulkan spec).
      */
     uint32_t aspect;
+
+    /**
+     * Optional description of how the host side will interpret the rendered
+     * target image.
+     *
+     * These fields let mpv/gpu-next compare the host target colorspace with
+     * the actual frame output and derive a colorspace hint, similar in spirit
+     * to MPV_RENDER_PARAM_DXGI_COLORSPACE_HINT.
+     *
+     * Use the same string names as mpv color options, for example
+     * "bt.709", "display-p3", "bt.2020" for primaries and
+     * "srgb", "linear", "pq", "hlg", "bt.1886" for transfer.
+     * Leave NULL if unknown.
+     */
+    const char *surface_primaries;
+    const char *surface_transfer;
+    float surface_min_luma;
+    float surface_max_luma;
+    float surface_max_cll;
+    float surface_max_fall;
 
     /**
      * Layout the host hands the image over to mpv in. mpv assumes the image

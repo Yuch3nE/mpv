@@ -7,6 +7,8 @@
 #include "common/common.h"
 #include "common/msg.h"
 #include "mpv/render_vk.h"
+#include "options/m_option.h"
+#include "video/csputils.h"
 #include "video/out/gpu/context.h"
 #include "video/out/gpu_next/libmpv_gpu_next.h"
 #include "video/out/gpu_next/video.h"
@@ -27,6 +29,8 @@ struct priv {
     uint32_t wrapped_aspect;
 
     mpv_vulkan_image current_target;
+    struct pl_color_space surface_color;
+    int surface_color_depth;
 };
 
 #if defined(VK_USE_64_BIT_PTR_DEFINES) && VK_USE_64_BIT_PTR_DEFINES
@@ -44,6 +48,55 @@ static void clear_wrapped_target_state(struct priv *p)
     p->wrapped_usage = 0;
     p->wrapped_aspect = 0;
     p->current_target = (mpv_vulkan_image){0};
+    p->surface_color = (struct pl_color_space){0};
+    p->surface_color_depth = 0;
+}
+
+static int parse_choice_value(const struct m_opt_choice_alternatives *choices,
+                              const char *name,
+                              int *out)
+{
+    if (!name || !name[0]) {
+        *out = 0;
+        return 0;
+    }
+
+    for (int n = 0; choices[n].name; n++) {
+        if (strcmp(choices[n].name, name) == 0) {
+            *out = choices[n].value;
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+static int parse_surface_color(struct libmpv_gpu_next_context *ctx,
+                               const mpv_vulkan_image *target,
+                               struct pl_color_space *out)
+{
+    *out = (struct pl_color_space){0};
+
+    int primaries = 0;
+    int transfer = 0;
+    if (parse_choice_value(pl_csp_prim_names, target->surface_primaries,
+                           &primaries) < 0 ||
+        parse_choice_value(pl_csp_trc_names, target->surface_transfer,
+                           &transfer) < 0)
+    {
+        MP_ERR(ctx, "Invalid Vulkan surface colorspace name(s): primaries='%s', transfer='%s'\n",
+               target->surface_primaries ? target->surface_primaries : "",
+               target->surface_transfer ? target->surface_transfer : "");
+        return MPV_ERROR_INVALID_PARAMETER;
+    }
+
+    out->primaries = primaries;
+    out->transfer = transfer;
+    out->hdr.min_luma = target->surface_min_luma;
+    out->hdr.max_luma = target->surface_max_luma;
+    out->hdr.max_cll = target->surface_max_cll;
+    out->hdr.max_fall = target->surface_max_fall;
+    return 0;
 }
 
 static void destroy_wrapped_target(struct libmpv_gpu_next_context *ctx)
@@ -172,6 +225,18 @@ static int init(struct libmpv_gpu_next_context *ctx, mpv_render_param *params)
     return 0;
 }
 
+static int query_target(struct libmpv_gpu_next_context *ctx,
+                        struct gpu_next_render_target *out)
+{
+    struct priv *p = ctx->priv;
+    *out = (struct gpu_next_render_target) {
+        .surface_color = p->surface_color,
+        .color_depth = p->surface_color_depth,
+        .flip_y = false,
+    };
+    return 0;
+}
+
 static int wrap_target(struct libmpv_gpu_next_context *ctx,
                        mpv_render_param *params,
                        struct gpu_next_render_target *out)
@@ -186,6 +251,11 @@ static int wrap_target(struct libmpv_gpu_next_context *ctx,
     {
         return MPV_ERROR_INVALID_PARAMETER;
     }
+
+    struct pl_color_space surface_color;
+    int err = parse_surface_color(ctx, target, &surface_color);
+    if (err < 0)
+        return err;
 
     if (!same_wrapped_target(p, target))
         destroy_wrapped_target(ctx);
@@ -234,9 +304,19 @@ static int wrap_target(struct libmpv_gpu_next_context *ctx,
         color_depth = GET_MPV_RENDER_PARAM(params, MPV_RENDER_PARAM_DEPTH,
                                            int, 0);
 
+    p->surface_color = surface_color;
+    p->surface_color_depth = color_depth;
+
+    struct pl_color_space frame_color = surface_color;
+    if (frame_color.transfer == PL_COLOR_TRC_UNKNOWN &&
+        frame_color.primaries == PL_COLOR_PRIM_UNKNOWN)
+    {
+        frame_color = pl_color_space_srgb;
+    }
+
     *out = (struct gpu_next_render_target) {
         .frame = {
-            .color = {0},
+            .color = frame_color,
             .repr = pl_color_repr_rgb,
             .num_planes = 1,
             .planes = {
@@ -247,7 +327,7 @@ static int wrap_target(struct libmpv_gpu_next_context *ctx,
                 },
             },
         },
-        .surface_color = {0},
+        .surface_color = surface_color,
         .color_depth = color_depth,
         .flip_y = false,
     };
@@ -294,6 +374,7 @@ static void destroy(struct libmpv_gpu_next_context *ctx)
 const struct libmpv_gpu_next_context_fns libmpv_gpu_next_context_vk = {
     .api_name = MPV_RENDER_API_TYPE_VULKAN,
     .init = init,
+    .query_target = query_target,
     .get_target_size = get_target_size,
     .wrap_target = wrap_target,
     .done_frame = done_frame,
